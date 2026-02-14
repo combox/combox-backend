@@ -1,0 +1,8 @@
+.env
+.env.*
+bin/
+.git/
+.gitignore
+README.md
+rules.md
+mwp.md

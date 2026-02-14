@@ -1,0 +1,42 @@
+SHELL := /bin/bash
+
+APP_NAME := combox-backend
+GO ?= go
+DOCKER ?= docker
+IMAGE ?= combox-backend:dev
+EDGE_DC := docker compose -f docker-compose.edge.yml
+
+.PHONY: tidy fmt build run test docker-build docker-run edge-up edge-down edge-logs
+
+tidy:
+	$(GO) mod tidy
+
+fmt:
+	$(GO) fmt ./...
+
+build:
+	$(GO) build -o bin/$(APP_NAME) ./cmd/api
+
+run:
+	set -a; source .env; set +a; $(GO) run ./cmd/api
+
+test:
+	$(GO) test ./...
+
+docker-build:
+	$(DOCKER) build -t $(IMAGE) .
+
+docker-run:
+	$(DOCKER) run --rm --env-file .env -p 8080:8080 $(IMAGE)
+
+edge-up:
+	@chmod +x ../chat-edge/scripts/init-mtls.sh
+	@../chat-edge/scripts/init-mtls.sh init >/dev/null 2>&1 || true
+	@../chat-edge/scripts/init-mtls.sh issue-server combox-backend >/dev/null 2>&1 || true
+	$(EDGE_DC) up -d --build
+
+edge-down:
+	$(EDGE_DC) down --remove-orphans
+
+edge-logs:
+	$(EDGE_DC) logs -f --tail=120 combox-backend

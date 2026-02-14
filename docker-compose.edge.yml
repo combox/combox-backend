@@ -1,0 +1,40 @@
+services:
+  combox-backend:
+    build:
+      context: .
+    container_name: combox-backend
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      HTTP_ADDRESS: ${HTTP_ADDRESS:-:8080}
+      TLS_ENABLED: ${TLS_ENABLED:-true}
+      TLS_CERT_FILE: ${TLS_CERT_FILE:-/etc/combox/mtls/server.crt}
+      TLS_KEY_FILE: ${TLS_KEY_FILE:-/etc/combox/mtls/server.key}
+      TLS_CLIENT_CA_FILE: ${TLS_CLIENT_CA_FILE:-/etc/combox/mtls/ca.crt}
+      HTTP_READ_TIMEOUT: ${HTTP_READ_TIMEOUT:-10s}
+      HTTP_WRITE_TIMEOUT: ${HTTP_WRITE_TIMEOUT:-15s}
+      HTTP_SHUTDOWN_TIMEOUT: ${HTTP_SHUTDOWN_TIMEOUT:-15s}
+      READY_TIMEOUT: ${READY_TIMEOUT:-2s}
+      DEFAULT_LOCALE: ${DEFAULT_LOCALE:-en}
+      POSTGRES_DSN: postgres://${POSTGRES_USER:-chat}:${POSTGRES_PASSWORD:-chat_local_password}@postgres:5432/${POSTGRES_DB:-chat}?sslmode=disable
+      VALKEY_ADDR: valkey:6379
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD:-}
+      VALKEY_DB: ${VALKEY_DB:-0}
+      AUTH_ACCESS_SECRET: ${AUTH_ACCESS_SECRET:-replace_with_access_secret_min_32_chars}
+      AUTH_REFRESH_SECRET: ${AUTH_REFRESH_SECRET:-replace_with_refresh_secret_min_32_chars}
+      AUTH_ACCESS_TTL: ${AUTH_ACCESS_TTL:-15m}
+      AUTH_REFRESH_TTL: ${AUTH_REFRESH_TTL:-720h}
+      MIGRATIONS_ENABLED: ${MIGRATIONS_ENABLED:-true}
+      MIGRATIONS_PATH: /app/migrations
+      STRINGS_PATH: /app/strings
+    volumes:
+      - ../combox-edge/mtls/ca.crt:/etc/combox/mtls/ca.crt:ro
+      - ../combox-edge/mtls/servers/combox-backend.crt:/etc/combox/mtls/server.crt:ro
+      - ../combox-edge/mtls/servers/combox-backend.key:/etc/combox/mtls/server.key:ro
+    networks:
+      - edge_core
+
+networks:
+  edge_core:
+    external: true
+    name: combox-edge-core
