@@ -17,7 +17,7 @@ on:
         type: boolean
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/combox-backend
@@ -63,7 +63,11 @@ jobs:
 
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
+          PRIMARY_TAG="${IMAGE_NAME}:${TAG}"
+          echo "primary_tag=${PRIMARY_TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -72,3 +76,59 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Write image metadata (release)
+        if: ${{ github.event_name == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+          {
+            echo "image=${IMAGE_NAME}"
+            echo "tags=${{ steps.meta.outputs.tags }}"
+            echo "primary_tag=${{ steps.meta.outputs.primary_tag }}"
+            echo "digest=${{ steps.build.outputs.digest }}"
+            echo "pulled_as=${{ steps.meta.outputs.primary_tag }}@${{ steps.build.outputs.digest }}"
+          } > dist/docker-image.txt
+
+      - name: Upload metadata to GitHub Release
+        if: ${{ github.event_name == 'release' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/docker-image.txt
+
+      - name: Update GitHub Release notes with Docker pull snippet
+        if: ${{ github.event_name == 'release' }}
+        uses: actions/github-script@v7
+        env:
+          DOCKERHUB_URL: https://hub.docker.com/r/${{ env.IMAGE_NAME }}
+        with:
+          script: |
+            const release = context.payload.release;
+            const primaryTag = `${{ steps.meta.outputs.primary_tag }}`;
+            const digest = `${{ steps.build.outputs.digest }}`;
+            const dockerHubUrl = process.env.DOCKERHUB_URL;
+
+            const snippet = [
+              "\n\n---\n\n## Docker image\n",
+              `Docker Hub: ${dockerHubUrl}\n`,
+              "\nPull:\n",
+              "```bash\n",
+              `docker pull ${primaryTag}\n`,
+              "```\n",
+              "\nPull by digest (immutable):\n",
+              "```bash\n",
+              `docker pull ${primaryTag}@${digest}\n`,
+              "```\n",
+            ].join("");
+
+            const body = (release.body || "") + snippet;
+
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.id,
+              body,
+            });
