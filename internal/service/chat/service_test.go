@@ -94,6 +94,10 @@ func (m *memMsgRepo) CreateMessage(_ context.Context, chatID, userID, content st
 	return msg, nil
 }
 
+func (m *memMsgRepo) CreateMessageWithAttachments(ctx context.Context, chatID, userID, content string, _ []string) (Message, error) {
+	return m.CreateMessage(ctx, chatID, userID, content)
+}
+
 func (m *memMsgRepo) CreateMessageE2E(_ context.Context, chatID, userID, senderDeviceID string, envelopes []E2EEnvelope) (Message, error) {
 	msg := Message{
 		ID:        "msg-1",
@@ -108,6 +112,10 @@ func (m *memMsgRepo) CreateMessageE2E(_ context.Context, chatID, userID, senderD
 	}
 	m.items = append(m.items, msg)
 	return msg, nil
+}
+
+func (m *memMsgRepo) CreateMessageE2EWithAttachments(ctx context.Context, chatID, userID, senderDeviceID string, envelopes []E2EEnvelope, _ []string) (Message, error) {
+	return m.CreateMessageE2E(ctx, chatID, userID, senderDeviceID, envelopes)
 }
 
 func (m *memMsgRepo) CreateForwardedMessage(ctx context.Context, chatID, sourceMessageID, userID string) (Message, error) {
@@ -151,6 +159,17 @@ func (m *memMsgRepo) UpdateMessageContent(_ context.Context, chatID, messageID, 
 		EditedAt:  &now,
 	}
 	return msg, nil
+}
+
+func (m *memMsgRepo) GetMessageMeta(_ context.Context, messageID string) (MessageMeta, error) {
+	if strings.TrimSpace(messageID) == "" {
+		return MessageMeta{}, ErrMessageNotFound
+	}
+	return MessageMeta{ID: messageID, ChatID: "chat-1", UserID: "u1", IsE2E: false}, nil
+}
+
+func (m *memMsgRepo) SoftDeleteMessage(_ context.Context, _ string, _ string, _ string) error {
+	return nil
 }
 
 func TestCreateChatAndMessageFlow(t *testing.T) {

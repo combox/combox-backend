@@ -17,6 +17,49 @@ type ChatRepository struct {
 	client *Client
 }
 
+func (r *MessageRepository) GetMessageMeta(ctx context.Context, messageID string) (chat.MessageMeta, error) {
+	const query = `
+		SELECT id::text, chat_id::text, user_id::text, is_e2e
+		FROM messages
+		WHERE id = $1::uuid
+		  AND deleted_at IS NULL
+		LIMIT 1
+	`
+
+	var meta chat.MessageMeta
+	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(messageID)).Scan(&meta.ID, &meta.ChatID, &meta.UserID, &meta.IsE2E); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return chat.MessageMeta{}, chat.ErrMessageNotFound
+		}
+		return chat.MessageMeta{}, err
+	}
+	return meta, nil
+}
+
+func (r *MessageRepository) SoftDeleteMessage(ctx context.Context, chatID, messageID, deleterUserID string) error {
+	const query = `
+		UPDATE messages
+		SET deleted_at = NOW(), updated_at = NOW()
+		WHERE id = $1::uuid
+		  AND chat_id = $2::uuid
+		  AND user_id = $3::uuid
+		  AND is_e2e = FALSE
+		  AND deleted_at IS NULL
+	`
+
+	tag, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(messageID), strings.TrimSpace(chatID), strings.TrimSpace(deleterUserID))
+	if err != nil {
+		if strings.Contains(err.Error(), "violates foreign key constraint") {
+			return chat.ErrChatNotFound
+		}
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return chat.ErrMessageNotFound
+	}
+	return nil
+}
+
 func NewChatRepository(client *Client) *ChatRepository {
 	return &ChatRepository{client: client}
 }
@@ -173,6 +216,60 @@ func (r *MessageRepository) CreateMessage(ctx context.Context, chatID, userID, c
 	return msg, nil
 }
 
+func (r *MessageRepository) CreateMessageWithAttachments(ctx context.Context, chatID, userID, content string, attachmentIDs []string) (chat.Message, error) {
+	tx, err := r.client.pool.Begin(ctx)
+	if err != nil {
+		return chat.Message{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if len(attachmentIDs) > 0 {
+		const validate = `
+			SELECT COUNT(*)
+			FROM attachments
+			WHERE id = ANY($1::uuid[])
+			  AND user_id = $2::uuid
+		`
+		var cnt int
+		if err := tx.QueryRow(ctx, validate, attachmentIDs, strings.TrimSpace(userID)).Scan(&cnt); err != nil {
+			return chat.Message{}, err
+		}
+		if cnt != len(attachmentIDs) {
+			return chat.Message{}, chat.ErrInvalidAttachments
+		}
+	}
+
+	const insertMsg = `
+		INSERT INTO messages (chat_id, user_id, content)
+		VALUES ($1::uuid, $2::uuid, $3)
+		RETURNING id::text, chat_id::text, user_id::text, content, is_e2e, created_at, edited_at
+	`
+	var msg chat.Message
+	if err := tx.QueryRow(ctx, insertMsg, strings.TrimSpace(chatID), strings.TrimSpace(userID), content).
+		Scan(&msg.ID, &msg.ChatID, &msg.UserID, &msg.Content, &msg.IsE2E, &msg.CreatedAt, &msg.EditedAt); err != nil {
+		if strings.Contains(err.Error(), "violates foreign key constraint") {
+			return chat.Message{}, chat.ErrChatNotFound
+		}
+		return chat.Message{}, err
+	}
+
+	if len(attachmentIDs) > 0 {
+		const link = `
+			INSERT INTO message_attachments (message_id, attachment_id)
+			SELECT $1::uuid, unnest($2::uuid[])
+			ON CONFLICT (message_id, attachment_id) DO NOTHING
+		`
+		if _, err := tx.Exec(ctx, link, strings.TrimSpace(msg.ID), attachmentIDs); err != nil {
+			return chat.Message{}, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return chat.Message{}, err
+	}
+	return msg, nil
+}
+
 func (r *MessageRepository) CreateForwardedMessage(ctx context.Context, chatID, sourceMessageID, userID string) (chat.Message, error) {
 	// Snapshot forward: copy the current content into a new message row.
 	// Forwarded message must be a standard (non-e2e) message.
@@ -318,6 +415,78 @@ func (r *MessageRepository) CreateMessageE2E(ctx context.Context, chatID, userID
 	for _, env := range envelopes {
 		if _, err := tx.Exec(ctx, insertEnvelope, msg.ID, env.RecipientDeviceID, env.Alg, env.Header, env.Ciphertext); err != nil {
 			return chat.Message{}, fmt.Errorf("insert envelope: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return chat.Message{}, fmt.Errorf("commit tx: %w", err)
+	}
+	return msg, nil
+}
+
+func (r *MessageRepository) CreateMessageE2EWithAttachments(ctx context.Context, chatID, userID, senderDeviceID string, envelopes []chat.E2EEnvelope, attachmentIDs []string) (chat.Message, error) {
+	tx, err := r.client.pool.Begin(ctx)
+	if err != nil {
+		return chat.Message{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if len(attachmentIDs) > 0 {
+		const validate = `
+			SELECT COUNT(*)
+			FROM attachments
+			WHERE id = ANY($1::uuid[])
+			  AND user_id = $2::uuid
+		`
+		var cnt int
+		if err := tx.QueryRow(ctx, validate, attachmentIDs, strings.TrimSpace(userID)).Scan(&cnt); err != nil {
+			return chat.Message{}, err
+		}
+		if cnt != len(attachmentIDs) {
+			return chat.Message{}, chat.ErrInvalidAttachments
+		}
+	}
+
+	const insertMessage = `
+		INSERT INTO messages (chat_id, user_id, content, is_e2e, e2e_sender_device_id)
+		VALUES ($1::uuid, $2::uuid, NULL, TRUE, $3::uuid)
+		RETURNING id::text, chat_id::text, user_id::text, content, is_e2e, e2e_sender_device_id::text, created_at
+	`
+
+	var msg chat.Message
+	var senderID string
+	if err := tx.QueryRow(ctx, insertMessage, chatID, userID, senderDeviceID).
+		Scan(&msg.ID, &msg.ChatID, &msg.UserID, &msg.Content, &msg.IsE2E, &senderID, &msg.CreatedAt); err != nil {
+		if strings.Contains(err.Error(), "violates foreign key constraint") {
+			return chat.Message{}, chat.ErrChatNotFound
+		}
+		return chat.Message{}, fmt.Errorf("insert message: %w", err)
+	}
+
+	msg.E2E = &chat.E2EPayload{SenderDeviceID: senderID}
+
+	const insertEnvelope = `
+		INSERT INTO message_envelopes (message_id, recipient_device_id, alg, header, ciphertext)
+		VALUES ($1::uuid, $2::uuid, $3, $4, $5)
+		ON CONFLICT (message_id, recipient_device_id) DO UPDATE
+		SET alg = EXCLUDED.alg,
+		    header = EXCLUDED.header,
+		    ciphertext = EXCLUDED.ciphertext
+	`
+	for _, env := range envelopes {
+		if _, err := tx.Exec(ctx, insertEnvelope, msg.ID, env.RecipientDeviceID, env.Alg, env.Header, env.Ciphertext); err != nil {
+			return chat.Message{}, fmt.Errorf("insert envelope: %w", err)
+		}
+	}
+
+	if len(attachmentIDs) > 0 {
+		const link = `
+			INSERT INTO message_attachments (message_id, attachment_id)
+			SELECT $1::uuid, unnest($2::uuid[])
+			ON CONFLICT (message_id, attachment_id) DO NOTHING
+		`
+		if _, err := tx.Exec(ctx, link, strings.TrimSpace(msg.ID), attachmentIDs); err != nil {
+			return chat.Message{}, err
 		}
 	}
 

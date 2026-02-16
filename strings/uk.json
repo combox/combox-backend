@@ -17,6 +17,8 @@
   "message.list.success": "повідомлення отримано",
   "message.status.upsert.success": "статус оновлено",
   "message.update.success": "повідомлення оновлено",
+  "message.delete.success": "повідомлення видалено",
+  "message.read.success": "повідомлення позначено як прочитане",
   "e2e.device_keys.upsert.success": "ключі пристрою оновлено",
   "e2e.devices.list.success": "пристрої отримано",
   "e2e.bundle.claim.success": "bundle отримано",

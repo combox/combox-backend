@@ -8,6 +8,7 @@ import (
 )
 
 type memUserRepo struct {
+	usersByID    map[string]User
 	usersByLogin map[string]User
 }
 
@@ -24,8 +25,23 @@ func (m *memUserRepo) Create(_ context.Context, input CreateUserInput) (User, er
 		Username:     input.Username,
 		PasswordHash: input.PasswordHash,
 	}
+	if m.usersByID == nil {
+		m.usersByID = map[string]User{}
+	}
+	m.usersByID[user.ID] = user
 	m.usersByLogin[input.Email] = user
 	m.usersByLogin[input.Username] = user
+	return user, nil
+}
+
+func (m *memUserRepo) FindByID(_ context.Context, userID string) (User, error) {
+	if m.usersByID == nil {
+		return User{}, ErrUserNotFound
+	}
+	user, ok := m.usersByID[userID]
+	if !ok {
+		return User{}, ErrUserNotFound
+	}
 	return user, nil
 }
 
@@ -35,6 +51,21 @@ func (m *memUserRepo) FindByLogin(_ context.Context, login string) (User, error)
 		return User{}, ErrUserNotFound
 	}
 	return user, nil
+}
+
+func (m *memUserRepo) UpdateSessionIdleTTL(_ context.Context, userID string, sessionIdleTTLSeconds *int64) error {
+	if m.usersByID == nil {
+		return ErrUserNotFound
+	}
+	user, ok := m.usersByID[userID]
+	if !ok {
+		return ErrUserNotFound
+	}
+	user.SessionIdleTTLSeconds = sessionIdleTTLSeconds
+	m.usersByID[userID] = user
+	m.usersByLogin[user.Email] = user
+	m.usersByLogin[user.Username] = user
+	return nil
 }
 
 type memSessionRepo struct {
@@ -80,7 +111,7 @@ func (m *memSessionRepo) DeleteByID(_ context.Context, sessionID string) error {
 }
 
 func TestRegisterLoginRefreshLogoutFlow(t *testing.T) {
-	users := &memUserRepo{usersByLogin: map[string]User{}}
+	users := &memUserRepo{usersByLogin: map[string]User{}, usersByID: map[string]User{}}
 	sessions := &memSessionRepo{sessions: map[string]Session{}}
 
 	svc, err := New(Config{
@@ -138,7 +169,7 @@ func TestRegisterLoginRefreshLogoutFlow(t *testing.T) {
 }
 
 func TestLoginInvalidCredentials(t *testing.T) {
-	users := &memUserRepo{usersByLogin: map[string]User{}}
+	users := &memUserRepo{usersByLogin: map[string]User{}, usersByID: map[string]User{}}
 	sessions := &memSessionRepo{sessions: map[string]Session{}}
 	svc, err := New(Config{
 		Users:         users,
@@ -166,5 +197,67 @@ func TestLoginInvalidCredentials(t *testing.T) {
 	}
 	if authErr.Code != CodeInvalidCredential {
 		t.Fatalf("unexpected error code: %s", authErr.Code)
+	}
+}
+
+func TestRefreshExtendsSessionUsingUserIdleTTL(t *testing.T) {
+	users := &memUserRepo{usersByLogin: map[string]User{}, usersByID: map[string]User{}}
+	sessions := &memSessionRepo{sessions: map[string]Session{}}
+
+	svc, err := New(Config{
+		Users:         users,
+		Sessions:      sessions,
+		AccessSecret:  "access-secret",
+		RefreshSecret: "refresh-secret",
+		AccessTTL:     15 * time.Minute,
+		RefreshTTL:    24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	svc.nowFn = func() time.Time { return base }
+
+	ctx := context.Background()
+	_, _, err = svc.Register(ctx, RegisterInput{
+		Email:    "user@example.com",
+		Username: "user",
+		Password: "StrongPassword123!",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	thirtyDays := int64((30 * 24 * time.Hour) / time.Second)
+	if err := users.UpdateSessionIdleTTL(ctx, "user-1", &thirtyDays); err != nil {
+		t.Fatalf("update session idle ttl: %v", err)
+	}
+	_, tokens, err := svc.Login(ctx, LoginInput{
+		Login:    "user@example.com",
+		Password: "StrongPassword123!",
+	})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// Simulate activity later; refresh should extend expires_at by the user-defined TTL.
+	base2 := base.Add(10 * 24 * time.Hour)
+	svc.nowFn = func() time.Time { return base2 }
+
+	refreshed, err := svc.Refresh(ctx, RefreshInput{RefreshToken: tokens.RefreshToken})
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	sessionID, _, err := parseRefreshToken(refreshed.RefreshToken)
+	if err != nil {
+		t.Fatalf("parse refresh token: %v", err)
+	}
+	session := sessions.sessions[sessionID]
+
+	expected := base2.Add(30 * 24 * time.Hour)
+	if !session.ExpiresAt.Equal(expected) {
+		t.Fatalf("expected expires_at to be extended: got=%s expected=%s", session.ExpiresAt, expected)
 	}
 }

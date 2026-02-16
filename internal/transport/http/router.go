@@ -38,6 +38,7 @@ type RouterDeps struct {
 	AccessSecret  string
 	Auth          AuthService
 	Chat          ChatService
+	Media         MediaService
 	E2E           E2EService
 }
 
@@ -64,6 +65,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.Chat != nil {
 		mux.HandleFunc("/api/private/v1/chats", newChatsHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/chats/", newChatMessagesHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/messages/", newMessagesByIDHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+	}
+	if deps.Media != nil {
+		mux.HandleFunc("/api/private/v1/media/attachments", newMediaAttachmentsHandler(deps.Media, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/media/attachments/", newMediaAttachmentByIDHandler(deps.Media, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.Valkey != nil {
 		mux.HandleFunc("/api/private/v1/ws", newWSHandler(deps.Valkey, deps.AccessSecret, deps.I18n, deps.DefaultLocale))
@@ -164,7 +170,10 @@ type ChatService interface {
 	ListMessages(ctx context.Context, input chat.ListMessagesInput) (chat.MessagePage, error)
 	UpsertMessageStatus(ctx context.Context, input chat.UpsertMessageStatusInput) (chat.MessageStatus, error)
 	EditMessage(ctx context.Context, input chat.EditMessageInput) (chat.Message, error)
+	EditMessageByID(ctx context.Context, userID, messageID, content string) (chat.Message, error)
 	ForwardMessage(ctx context.Context, input chat.ForwardMessageInput) (chat.Message, error)
+	DeleteMessageByID(ctx context.Context, userID, messageID string) error
+	MarkMessageReadByID(ctx context.Context, userID, messageID string) (chat.MessageStatus, error)
 }
 
 type E2EService interface {

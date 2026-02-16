@@ -1,12 +1,11 @@
 package http
 
 import (
+	authsvc "combox-backend/internal/service/auth"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
-
-	authsvc "combox-backend/internal/service/auth"
 )
 
 type registerRequest struct {

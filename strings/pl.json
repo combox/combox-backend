@@ -17,6 +17,8 @@
   "message.list.success": "wiadomosci pobrane",
   "message.status.upsert.success": "status zaktualizowany",
   "message.update.success": "wiadomosc zaktualizowana",
+  "message.delete.success": "wiadomosc usunieta",
+  "message.read.success": "wiadomosc oznaczona jako przeczytana",
   "e2e.device_keys.upsert.success": "klucze urzadzenia zaktualizowane",
   "e2e.devices.list.success": "urzadzenia pobrane",
   "e2e.bundle.claim.success": "bundle pobrany",

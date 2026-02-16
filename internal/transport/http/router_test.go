@@ -233,8 +233,20 @@ func (stubChatService) EditMessage(context.Context, chatsvc.EditMessageInput) (c
 	return chatsvc.Message{}, nil
 }
 
+func (stubChatService) EditMessageByID(context.Context, string, string, string) (chatsvc.Message, error) {
+	return chatsvc.Message{}, nil
+}
+
 func (stubChatService) ForwardMessage(context.Context, chatsvc.ForwardMessageInput) (chatsvc.Message, error) {
 	return chatsvc.Message{}, nil
+}
+
+func (stubChatService) DeleteMessageByID(context.Context, string, string) error {
+	return nil
+}
+
+func (stubChatService) MarkMessageReadByID(context.Context, string, string) (chatsvc.MessageStatus, error) {
+	return chatsvc.MessageStatus{Status: "read"}, nil
 }
 
 type stubAuthService struct {
@@ -331,11 +343,13 @@ func TestCreateChatRoute(t *testing.T) {
 		ReadyTimeout:  time.Second,
 		I18n:          testTranslator(),
 		DefaultLocale: "en",
+		AccessSecret:  "test-secret",
 		Chat:          stubChatService{},
 	})
 
 	req := httptest.NewRequest(stdhttp.MethodPost, "/api/private/v1/chats", strings.NewReader(`{"title":"General","member_ids":["u2"]}`))
-	req.Header.Set("X-User-ID", "u1")
+	token := makeAccessToken(t, "u1", "test-secret", time.Now().UTC().Add(10*time.Minute).Unix())
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 

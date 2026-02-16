@@ -59,7 +59,7 @@ All private endpoints require `Authorization: Bearer <access_token>` header.
 
 ### Realtime (M4)
 
-- WebSocket: `/api/private/v1/ws?access_token=<token>`
+- WebSocket: `wss://<host>/api/private/v1/ws?access_token=<token>` (use `ws://` only for local non-TLS)
 - Subscribe/unsubscribe to chat streams
 - Fanout across instances via Valkey
 
@@ -81,6 +81,12 @@ All private endpoints require `Authorization: Bearer <access_token>` header.
 - JWT access tokens (short-lived) + refresh tokens (long-lived)
 - Refresh sessions stored in PostgreSQL with revocation support
 - WebSocket authentication via query parameter `access_token`
+
+Session persistence is based on a sliding refresh-session expiration:
+
+- User setting `users.session_idle_ttl_seconds` defines how long the user can stay offline.
+- Each successful `refresh` extends `sessions.expires_at = now + session_idle_ttl`.
+- If the user does not refresh within the selected period, the session expires and login is required.
 
 ### Authorization
 

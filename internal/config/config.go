@@ -27,6 +27,7 @@ type Config struct {
 	Auth       AuthConfig
 	Postgres   PostgresConfig
 	Valkey     ValkeyConfig
+	MinIO      MinIOConfig
 	Migrations MigrationsConfig
 }
 
@@ -60,6 +61,15 @@ type ValkeyConfig struct {
 	Addr     string
 	Password string
 	DB       int
+}
+
+type MinIOConfig struct {
+	APIInternal  string
+	Bucket       string
+	RootUser     string
+	RootPassword string
+	Secure       bool
+	Region       string
 }
 
 type MigrationsConfig struct {
@@ -96,6 +106,14 @@ func Load() (Config, error) {
 			Addr:     getEnv("VALKEY_ADDR", "127.0.0.1:6379"),
 			Password: os.Getenv("VALKEY_PASSWORD"),
 			DB:       getIntEnv("VALKEY_DB", 0),
+		},
+		MinIO: MinIOConfig{
+			APIInternal:  strings.TrimSpace(os.Getenv("MINIO_API_INTERNAL")),
+			Bucket:       strings.TrimSpace(os.Getenv("MINIO_BUCKET")),
+			RootUser:     strings.TrimSpace(os.Getenv("MINIO_ROOT_USER")),
+			RootPassword: strings.TrimSpace(os.Getenv("MINIO_ROOT_PASSWORD")),
+			Secure:       getBoolEnv("MINIO_SECURE", false),
+			Region:       getEnv("MINIO_REGION", "us-east-1"),
 		},
 		Migrations: MigrationsConfig{
 			Enabled: getBoolEnv("MIGRATIONS_ENABLED", true),
@@ -151,6 +169,18 @@ func (c Config) Validate() error {
 	}
 	if c.Auth.RefreshTTL <= 0 {
 		return errors.New("AUTH_REFRESH_TTL must be positive")
+	}
+	if strings.TrimSpace(c.MinIO.APIInternal) == "" {
+		return errors.New("MINIO_API_INTERNAL is required")
+	}
+	if strings.TrimSpace(c.MinIO.Bucket) == "" {
+		return errors.New("MINIO_BUCKET is required")
+	}
+	if strings.TrimSpace(c.MinIO.RootUser) == "" {
+		return errors.New("MINIO_ROOT_USER is required")
+	}
+	if strings.TrimSpace(c.MinIO.RootPassword) == "" {
+		return errors.New("MINIO_ROOT_PASSWORD is required")
 	}
 	return nil
 }

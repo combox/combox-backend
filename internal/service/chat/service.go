@@ -27,6 +27,13 @@ type Error struct {
 	Cause      error
 }
 
+type MessageMeta struct {
+	ID     string
+	ChatID string
+	UserID string
+	IsE2E  bool
+}
+
 func (s *Service) EditMessage(ctx context.Context, input EditMessageInput) (Message, error) {
 	userID := strings.TrimSpace(input.UserID)
 	chatID := strings.TrimSpace(input.ChatID)
@@ -86,6 +93,108 @@ func (s *Service) EditMessage(ctx context.Context, input EditMessageInput) (Mess
 		}
 	}
 	return updated, nil
+}
+
+func (s *Service) MarkMessageReadByID(ctx context.Context, userID, messageID string) (MessageStatus, error) {
+	userID = strings.TrimSpace(userID)
+	messageID = strings.TrimSpace(messageID)
+	if userID == "" || messageID == "" {
+		return MessageStatus{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input"}
+	}
+
+	meta, err := s.messages.GetMessageMeta(ctx, messageID)
+	if err != nil {
+		if errors.Is(err, ErrMessageNotFound) {
+			return MessageStatus{}, &Error{Code: CodeNotFound, MessageKey: "error.message.not_found", Cause: err}
+		}
+		return MessageStatus{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+
+	return s.UpsertMessageStatus(ctx, UpsertMessageStatusInput{
+		UserID:    userID,
+		ChatID:    meta.ChatID,
+		MessageID: meta.ID,
+		Status:    "read",
+	})
+}
+
+func (s *Service) nowUTC() time.Time {
+	return time.Now().UTC()
+}
+
+func (s *Service) EditMessageByID(ctx context.Context, userID, messageID, content string) (Message, error) {
+	userID = strings.TrimSpace(userID)
+	messageID = strings.TrimSpace(messageID)
+	content = strings.TrimSpace(content)
+	if userID == "" || messageID == "" || content == "" {
+		return Message{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input"}
+	}
+
+	meta, err := s.messages.GetMessageMeta(ctx, messageID)
+	if err != nil {
+		if errors.Is(err, ErrMessageNotFound) {
+			return Message{}, &Error{Code: CodeNotFound, MessageKey: "error.message.not_found", Cause: err}
+		}
+		return Message{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+
+	return s.EditMessage(ctx, EditMessageInput{
+		UserID:    userID,
+		ChatID:    meta.ChatID,
+		MessageID: meta.ID,
+		Content:   content,
+	})
+}
+
+func (s *Service) DeleteMessageByID(ctx context.Context, userID, messageID string) error {
+	userID = strings.TrimSpace(userID)
+	messageID = strings.TrimSpace(messageID)
+	if userID == "" || messageID == "" {
+		return &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input"}
+	}
+
+	meta, err := s.messages.GetMessageMeta(ctx, messageID)
+	if err != nil {
+		if errors.Is(err, ErrMessageNotFound) {
+			return &Error{Code: CodeNotFound, MessageKey: "error.message.not_found", Cause: err}
+		}
+		return &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+
+	member, err := s.chats.IsChatMember(ctx, meta.ChatID, userID)
+	if err != nil {
+		return &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+	if !member {
+		return &Error{Code: CodeForbidden, MessageKey: "error.chat.forbidden"}
+	}
+
+	chatMeta, err := s.chats.GetChat(ctx, meta.ChatID)
+	if err != nil {
+		if errors.Is(err, ErrChatNotFound) {
+			return &Error{Code: CodeNotFound, MessageKey: "error.chat.not_found", Cause: err}
+		}
+		return &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+	chatType := strings.TrimSpace(chatMeta.Type)
+	if chatType == "" {
+		chatType = ChatTypeStandard
+	}
+	if chatType != ChatTypeStandard {
+		return &Error{Code: CodeInvalidArgument, MessageKey: "error.message.edit_not_allowed"}
+	}
+
+	if err := s.messages.SoftDeleteMessage(ctx, meta.ChatID, meta.ID, userID); err != nil {
+		if errors.Is(err, ErrMessageNotFound) {
+			return &Error{Code: CodeNotFound, MessageKey: "error.message.not_found", Cause: err}
+		}
+		if errors.Is(err, ErrChatNotFound) {
+			return &Error{Code: CodeNotFound, MessageKey: "error.chat.not_found", Cause: err}
+		}
+		return &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+
+	return nil
 }
 
 func (s *Service) ForwardMessage(ctx context.Context, input ForwardMessageInput) (Message, error) {
@@ -206,6 +315,7 @@ type CreateMessageInput struct {
 	UserID         string
 	ChatID         string
 	Content        string
+	AttachmentIDs  []string
 	SenderDeviceID string
 	Envelopes      []E2EEnvelope
 }
@@ -228,12 +338,20 @@ type ChatRepository interface {
 
 type MessageRepository interface {
 	CreateMessage(ctx context.Context, chatID, userID, content string) (Message, error)
+	CreateMessageWithAttachments(ctx context.Context, chatID, userID, content string, attachmentIDs []string) (Message, error)
 	CreateMessageE2E(ctx context.Context, chatID, userID, senderDeviceID string, envelopes []E2EEnvelope) (Message, error)
+	CreateMessageE2EWithAttachments(ctx context.Context, chatID, userID, senderDeviceID string, envelopes []E2EEnvelope, attachmentIDs []string) (Message, error)
 	CreateForwardedMessage(ctx context.Context, chatID, sourceMessageID, userID string) (Message, error)
 	ListMessages(ctx context.Context, chatID string, limit int, cursor string) (MessagePage, error)
 	ListMessagesForDevice(ctx context.Context, chatID, deviceID string, limit int, cursor string) (MessagePage, error)
 	UpsertMessageStatus(ctx context.Context, chatID, messageID, userID, status string) (MessageStatus, error)
 	UpdateMessageContent(ctx context.Context, chatID, messageID, editorUserID, newContent string) (Message, error)
+	GetMessageMeta(ctx context.Context, messageID string) (MessageMeta, error)
+	SoftDeleteMessage(ctx context.Context, chatID, messageID, deleterUserID string) error
+}
+
+type StatusRepository interface {
+	UpsertMessageStatus(ctx context.Context, chatID, messageID, userID, status string, at time.Time) (MessageStatus, error)
 }
 
 type MessageEventPublisher interface {
@@ -309,13 +427,15 @@ type UpsertMessageStatusInput struct {
 }
 
 type Service struct {
-	chats     ChatRepository
-	messages  MessageRepository
-	publisher MessageEventPublisher
+	chats      ChatRepository
+	messages   MessageRepository
+	publisher  MessageEventPublisher
+	statusRepo StatusRepository
 }
 
 var ErrChatNotFound = errors.New("chat not found")
 var ErrMessageNotFound = errors.New("message not found")
+var ErrInvalidAttachments = errors.New("invalid attachments")
 
 func New(chats ChatRepository, messages MessageRepository) (*Service, error) {
 	if chats == nil {
@@ -333,6 +453,15 @@ func NewWithPublisher(chats ChatRepository, messages MessageRepository, publishe
 		return nil, err
 	}
 	svc.publisher = publisher
+	return svc, nil
+}
+
+func NewWithPublisherAndStatusRepo(chats ChatRepository, messages MessageRepository, publisher MessageEventPublisher, statusRepo StatusRepository) (*Service, error) {
+	svc, err := NewWithPublisher(chats, messages, publisher)
+	if err != nil {
+		return nil, err
+	}
+	svc.statusRepo = statusRepo
 	return svc, nil
 }
 
@@ -393,6 +522,14 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 	chatID := strings.TrimSpace(input.ChatID)
 	content := strings.TrimSpace(input.Content)
 	senderDeviceID := strings.TrimSpace(input.SenderDeviceID)
+	attachmentIDs := make([]string, 0, len(input.AttachmentIDs))
+	for _, id := range input.AttachmentIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		attachmentIDs = append(attachmentIDs, id)
+	}
 
 	if userID == "" || chatID == "" {
 		return Message{}, &Error{
@@ -403,7 +540,7 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 
 	isE2E := len(input.Envelopes) > 0 || senderDeviceID != ""
 	if !isE2E {
-		if content == "" {
+		if content == "" && len(attachmentIDs) == 0 {
 			return Message{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input"}
 		}
 	}
@@ -463,13 +600,24 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 	var message Message
 	var repoErr error
 	if isE2E {
-		message, repoErr = s.messages.CreateMessageE2E(ctx, chatID, userID, senderDeviceID, input.Envelopes)
+		if len(attachmentIDs) > 0 {
+			message, repoErr = s.messages.CreateMessageE2EWithAttachments(ctx, chatID, userID, senderDeviceID, input.Envelopes, attachmentIDs)
+		} else {
+			message, repoErr = s.messages.CreateMessageE2E(ctx, chatID, userID, senderDeviceID, input.Envelopes)
+		}
 	} else {
-		message, repoErr = s.messages.CreateMessage(ctx, chatID, userID, content)
+		if len(attachmentIDs) > 0 {
+			message, repoErr = s.messages.CreateMessageWithAttachments(ctx, chatID, userID, content, attachmentIDs)
+		} else {
+			message, repoErr = s.messages.CreateMessage(ctx, chatID, userID, content)
+		}
 	}
 	if repoErr != nil {
 		if errors.Is(repoErr, ErrChatNotFound) {
 			return Message{}, &Error{Code: CodeNotFound, MessageKey: "error.chat.not_found", Cause: repoErr}
+		}
+		if errors.Is(repoErr, ErrInvalidAttachments) {
+			return Message{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input", Cause: repoErr}
 		}
 		return Message{}, &Error{
 			Code:       CodeInternal,
@@ -568,7 +716,7 @@ func (s *Service) UpsertMessageStatus(ctx context.Context, input UpsertMessageSt
 	chatID := strings.TrimSpace(input.ChatID)
 	messageID := strings.TrimSpace(input.MessageID)
 	status := strings.ToLower(strings.TrimSpace(input.Status))
-	if userID == "" || chatID == "" || messageID == "" {
+	if userID == "" || chatID == "" || messageID == "" || status == "" {
 		return MessageStatus{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input"}
 	}
 	if status != "delivered" && status != "read" {
@@ -583,7 +731,13 @@ func (s *Service) UpsertMessageStatus(ctx context.Context, input UpsertMessageSt
 		return MessageStatus{}, &Error{Code: CodeForbidden, MessageKey: "error.chat.forbidden"}
 	}
 
-	updated, repoErr := s.messages.UpsertMessageStatus(ctx, chatID, messageID, userID, status)
+	var updated MessageStatus
+	var repoErr error
+	if s.statusRepo != nil {
+		updated, repoErr = s.statusRepo.UpsertMessageStatus(ctx, chatID, messageID, userID, status, s.nowUTC())
+	} else {
+		updated, repoErr = s.messages.UpsertMessageStatus(ctx, chatID, messageID, userID, status)
+	}
 	if repoErr != nil {
 		if errors.Is(repoErr, ErrChatNotFound) {
 			return MessageStatus{}, &Error{Code: CodeNotFound, MessageKey: "error.chat.not_found", Cause: repoErr}

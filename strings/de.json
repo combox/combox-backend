@@ -17,6 +17,8 @@
   "message.list.success": "nachrichten geladen",
   "message.status.upsert.success": "status aktualisiert",
   "message.update.success": "nachricht aktualisiert",
+  "message.delete.success": "nachricht gelöscht",
+  "message.read.success": "nachricht als gelesen markiert",
   "e2e.device_keys.upsert.success": "geräteschlüssel aktualisiert",
   "e2e.devices.list.success": "geräte geladen",
   "e2e.bundle.claim.success": "bundle geladen",

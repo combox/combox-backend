@@ -43,10 +43,11 @@ func (e *Error) Unwrap() error {
 }
 
 type User struct {
-	ID           string
-	Email        string
-	Username     string
-	PasswordHash string
+	ID                    string
+	Email                 string
+	Username              string
+	PasswordHash          string
+	SessionIdleTTLSeconds *int64
 }
 
 type Session struct {
@@ -73,7 +74,9 @@ type CreateSessionInput struct {
 
 type UserRepository interface {
 	Create(ctx context.Context, input CreateUserInput) (User, error)
+	FindByID(ctx context.Context, userID string) (User, error)
 	FindByLogin(ctx context.Context, login string) (User, error)
+	UpdateSessionIdleTTL(ctx context.Context, userID string, sessionIdleTTLSeconds *int64) error
 }
 
 type SessionRepository interface {
@@ -212,7 +215,11 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (User, Toke
 		}
 	}
 
-	tokens, err := s.issueSessionTokens(ctx, user.ID, input.UserAgent, input.IPAddress)
+	idleTTL := s.refreshTTL
+	if user.SessionIdleTTLSeconds != nil {
+		idleTTL = time.Duration(*user.SessionIdleTTLSeconds) * time.Second
+	}
+	tokens, err := s.issueSessionTokens(ctx, user.ID, input.UserAgent, input.IPAddress, idleTTL)
 	if err != nil {
 		return User{}, Tokens{}, err
 	}
@@ -253,7 +260,11 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (User, Tokens, er
 		}
 	}
 
-	tokens, err := s.issueSessionTokens(ctx, user.ID, input.UserAgent, input.IPAddress)
+	idleTTL := s.refreshTTL
+	if user.SessionIdleTTLSeconds != nil {
+		idleTTL = time.Duration(*user.SessionIdleTTLSeconds) * time.Second
+	}
+	tokens, err := s.issueSessionTokens(ctx, user.ID, input.UserAgent, input.IPAddress, idleTTL)
 	if err != nil {
 		return User{}, Tokens{}, err
 	}
@@ -302,6 +313,27 @@ func (s *Service) Refresh(ctx context.Context, input RefreshInput) (Tokens, erro
 		}
 	}
 
+	user, err := s.users.FindByID(ctx, session.UserID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return Tokens{}, &Error{
+				Code:       CodeUnauthorized,
+				MessageKey: "error.auth.invalid_refresh_token",
+				Cause:      err,
+			}
+		}
+		return Tokens{}, &Error{
+			Code:       CodeInternal,
+			MessageKey: "error.internal",
+			Cause:      err,
+		}
+	}
+
+	idleTTL := s.refreshTTL
+	if user.SessionIdleTTLSeconds != nil {
+		idleTTL = time.Duration(*user.SessionIdleTTLSeconds) * time.Second
+	}
+
 	nextRefreshPart, err := newRandomToken(32)
 	if err != nil {
 		return Tokens{}, &Error{
@@ -321,7 +353,7 @@ func (s *Service) Refresh(ctx context.Context, input RefreshInput) (Tokens, erro
 	}
 
 	nextRefreshToken := session.ID + "." + nextRefreshPart
-	nextExpiresAt := s.nowFn().UTC().Add(s.refreshTTL)
+	nextExpiresAt := s.nowFn().UTC().Add(idleTTL)
 	if err := s.sessions.UpdateRefresh(ctx, session.ID, hashRefreshValue(nextRefreshPart, s.refreshSecret), nextExpiresAt); err != nil {
 		return Tokens{}, &Error{
 			Code:       CodeInternal,
@@ -358,7 +390,7 @@ func (s *Service) Logout(ctx context.Context, input LogoutInput) error {
 	return nil
 }
 
-func (s *Service) issueSessionTokens(ctx context.Context, userID, userAgent, ipAddress string) (Tokens, error) {
+func (s *Service) issueSessionTokens(ctx context.Context, userID, userAgent, ipAddress string, idleTTL time.Duration) (Tokens, error) {
 	sessionID, err := newRandomToken(16)
 	if err != nil {
 		return Tokens{}, &Error{
@@ -387,7 +419,7 @@ func (s *Service) issueSessionTokens(ctx context.Context, userID, userAgent, ipA
 	}
 
 	refreshToken := sessionID + "." + refreshPart
-	expiresAt := s.nowFn().UTC().Add(s.refreshTTL)
+	expiresAt := s.nowFn().UTC().Add(idleTTL)
 	_, err = s.sessions.Create(ctx, CreateSessionInput{
 		ID:               sessionID,
 		UserID:           userID,

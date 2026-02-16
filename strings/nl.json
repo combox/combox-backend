@@ -17,6 +17,8 @@
   "message.list.success": "berichten opgehaald",
   "message.status.upsert.success": "status bijgewerkt",
   "message.update.success": "bericht bijgewerkt",
+  "message.delete.success": "bericht verwijderd",
+  "message.read.success": "bericht als gelezen gemarkeerd",
   "e2e.device_keys.upsert.success": "apparaatsleutels bijgewerkt",
   "e2e.devices.list.success": "apparaten opgehaald",
   "e2e.bundle.claim.success": "bundle opgehaald",

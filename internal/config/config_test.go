@@ -11,6 +11,10 @@ func TestLoadSuccess(t *testing.T) {
 	t.Setenv("STRINGS_PATH", "strings")
 	t.Setenv("AUTH_ACCESS_SECRET", "access-secret")
 	t.Setenv("AUTH_REFRESH_SECRET", "refresh-secret")
+	t.Setenv("MINIO_API_INTERNAL", "http://minio:9000")
+	t.Setenv("MINIO_BUCKET", "chat-media")
+	t.Setenv("MINIO_ROOT_USER", "minioadmin")
+	t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin123")
 
 	cfg, err := Load()
 	if err != nil {
@@ -31,6 +35,10 @@ func TestLoadMissingPostgresDSN(t *testing.T) {
 	t.Setenv("STRINGS_PATH", "strings")
 	t.Setenv("AUTH_ACCESS_SECRET", "access-secret")
 	t.Setenv("AUTH_REFRESH_SECRET", "refresh-secret")
+	t.Setenv("MINIO_API_INTERNAL", "http://minio:9000")
+	t.Setenv("MINIO_BUCKET", "chat-media")
+	t.Setenv("MINIO_ROOT_USER", "minioadmin")
+	t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin123")
 
 	_, err := Load()
 	if err == nil {
@@ -46,6 +54,10 @@ func TestLoadInvalidReadyTimeoutFallsBack(t *testing.T) {
 	t.Setenv("READY_TIMEOUT", "invalid")
 	t.Setenv("AUTH_ACCESS_SECRET", "access-secret")
 	t.Setenv("AUTH_REFRESH_SECRET", "refresh-secret")
+	t.Setenv("MINIO_API_INTERNAL", "http://minio:9000")
+	t.Setenv("MINIO_BUCKET", "chat-media")
+	t.Setenv("MINIO_ROOT_USER", "minioadmin")
+	t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin123")
 
 	cfg, err := Load()
 	if err != nil {
@@ -63,6 +75,10 @@ func TestLoadMissingAuthSecrets(t *testing.T) {
 	t.Setenv("STRINGS_PATH", "strings")
 	t.Setenv("AUTH_ACCESS_SECRET", "")
 	t.Setenv("AUTH_REFRESH_SECRET", "")
+	t.Setenv("MINIO_API_INTERNAL", "http://minio:9000")
+	t.Setenv("MINIO_BUCKET", "chat-media")
+	t.Setenv("MINIO_ROOT_USER", "minioadmin")
+	t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin123")
 
 	_, err := Load()
 	if err == nil {

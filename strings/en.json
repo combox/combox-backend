@@ -17,6 +17,8 @@
   "message.list.success": "messages fetched",
   "message.status.upsert.success": "status updated",
   "message.update.success": "message updated",
+  "message.delete.success": "message deleted",
+  "message.read.success": "message marked as read",
   "e2e.device_keys.upsert.success": "device keys updated",
   "e2e.devices.list.success": "devices fetched",
   "e2e.bundle.claim.success": "bundle fetched",

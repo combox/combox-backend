@@ -16,11 +16,13 @@ import (
 	"combox-backend/internal/config"
 	"combox-backend/internal/i18n"
 	"combox-backend/internal/observability"
+	miniorepo "combox-backend/internal/repository/minio"
 	pgrepo "combox-backend/internal/repository/postgres"
 	vkrepo "combox-backend/internal/repository/valkey"
 	authsvc "combox-backend/internal/service/auth"
 	chatsvc "combox-backend/internal/service/chat"
 	e2esvc "combox-backend/internal/service/e2e"
+	mediasvc "combox-backend/internal/service/media"
 	httptransport "combox-backend/internal/transport/http"
 )
 
@@ -69,6 +71,32 @@ func (a chatPublisherAdapter) PublishMessageUpdated(ctx context.Context, ev chat
 		Content:         ev.Content,
 		EditedAt:        ev.EditedAt,
 	})
+}
+
+type mediaStoreAdapter struct{ c *miniorepo.Client }
+
+func (a mediaStoreAdapter) Bucket() string {
+	return a.c.Bucket()
+}
+
+func (a mediaStoreAdapter) NewMultipartUpload(ctx context.Context, objectKey, contentType string) (string, error) {
+	return a.c.NewMultipartUpload(ctx, objectKey, contentType)
+}
+
+func (a mediaStoreAdapter) PresignUploadPart(ctx context.Context, objectKey, uploadID string, partNumber int, expires time.Duration) (string, error) {
+	return a.c.PresignUploadPart(ctx, objectKey, uploadID, partNumber, expires)
+}
+
+func (a mediaStoreAdapter) CompleteMultipartUpload(ctx context.Context, objectKey, uploadID string, parts []mediasvc.CompletePart, contentType string) error {
+	converted := make([]miniorepo.CompletePart, 0, len(parts))
+	for _, p := range parts {
+		converted = append(converted, miniorepo.CompletePart{PartNumber: p.PartNumber, ETag: p.ETag})
+	}
+	return a.c.CompleteMultipartUpload(ctx, objectKey, uploadID, converted, contentType)
+}
+
+func (a mediaStoreAdapter) PresignGetObject(ctx context.Context, objectKey string, expires time.Duration) (string, error) {
+	return a.c.PresignGetObject(ctx, objectKey, expires)
 }
 
 func Run(ctx context.Context) error {
@@ -123,9 +151,10 @@ func Run(ctx context.Context) error {
 	chatRepo := pgrepo.NewChatRepository(postgresClient)
 	msgRepo := pgrepo.NewMessageRepository(postgresClient)
 	publisher := vkrepo.NewEventPublisher(valkeyClient)
+	statusRepo := vkrepo.NewMessageStatusRepository(valkeyClient)
 
 	chatPublisher := &chatPublisherAdapter{p: publisher}
-	chatSvc, err := chatsvc.NewWithPublisher(chatRepo, msgRepo, chatPublisher)
+	chatSvc, err := chatsvc.NewWithPublisherAndStatusRepo(chatRepo, msgRepo, chatPublisher, statusRepo)
 	if err != nil {
 		return fmt.Errorf("init chat service: %w", err)
 	}
@@ -133,6 +162,15 @@ func Run(ctx context.Context) error {
 	e2eService, err := e2esvc.New(pgrepo.NewE2ERepository(postgresClient))
 	if err != nil {
 		return fmt.Errorf("init e2e service: %w", err)
+	}
+
+	minioClient, err := miniorepo.New(cfg.MinIO)
+	if err != nil {
+		return fmt.Errorf("init minio: %w", err)
+	}
+	mediaService, err := mediasvc.New(pgrepo.NewMediaRepository(postgresClient), mediaStoreAdapter{c: minioClient})
+	if err != nil {
+		return fmt.Errorf("init media service: %w", err)
 	}
 
 	router := httptransport.NewRouter(httptransport.RouterDeps{
@@ -145,6 +183,7 @@ func Run(ctx context.Context) error {
 		AccessSecret:  cfg.Auth.AccessSecret,
 		Auth:          authService,
 		Chat:          chatSvc,
+		Media:         mediaService,
 		E2E:           e2eService,
 	})
 

@@ -33,8 +33,9 @@ func messageEditFromPath(path string) (string, string, bool) {
 }
 
 type createMessageRequest struct {
-	Content string `json:"content"`
-	E2E     *struct {
+	Content       string   `json:"content"`
+	AttachmentIDs []string `json:"attachment_ids"`
+	E2E           *struct {
 		SenderDeviceID string                `json:"sender_device_id"`
 		Envelopes      []chatsvc.E2EEnvelope `json:"envelopes"`
 	} `json:"e2e"`
@@ -46,6 +47,102 @@ type upsertMessageStatusRequest struct {
 
 type editMessageRequest struct {
 	Content string `json:"content"`
+}
+
+func messageReadFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/messages/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 2 {
+		return "", false
+	}
+	if parts[0] == "" || parts[1] != "read" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+func messageIDFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/messages/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 1 {
+		return "", false
+	}
+	if parts[0] == "" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+func newMessagesByIDHandler(chat ChatService, i18n Translator, defaultLocale string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
+		if userID == "" {
+			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.auth.missing_user_context", nil, i18n, defaultLocale)
+			return
+		}
+
+		if r.Method == http.MethodPost {
+			if messageID, ok := messageReadFromPath(r.URL.Path); ok {
+				status, err := chat.MarkMessageReadByID(r.Context(), userID, messageID)
+				if err != nil {
+					writeChatServiceError(w, r, err, i18n, defaultLocale)
+					return
+				}
+				locale := requestLocale(r, defaultLocale)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"message": i18n.Translate(locale, "message.read.success"),
+					"status":  status,
+				})
+				return
+			}
+		}
+
+		messageID, ok := messageIDFromPath(r.URL.Path)
+		if !ok {
+			writeAPIError(w, r, http.StatusNotFound, "not_found", "error.request.not_found", nil, i18n, defaultLocale)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodPatch:
+			var req editMessageRequest
+			if err := decodeJSON(r, &req); err != nil {
+				writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+				return
+			}
+			updated, err := chat.EditMessageByID(r.Context(), userID, messageID, req.Content)
+			if err != nil {
+				writeChatServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+			locale := requestLocale(r, defaultLocale)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"message": i18n.Translate(locale, "message.update.success"),
+				"item":    updated,
+			})
+		case http.MethodDelete:
+			if err := chat.DeleteMessageByID(r.Context(), userID, messageID); err != nil {
+				writeChatServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+			locale := requestLocale(r, defaultLocale)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"message": i18n.Translate(locale, "message.delete.success"),
+			})
+		default:
+			writeMethodNotAllowed(w, r, i18n, defaultLocale)
+		}
+	}
 }
 
 func messageForwardFromPath(path string) (string, string, bool) {
@@ -242,9 +339,10 @@ func newChatMessagesHandler(chat ChatService, i18n Translator, defaultLocale str
 				return
 			}
 			input := chatsvc.CreateMessageInput{
-				UserID:  userID,
-				ChatID:  chatID,
-				Content: req.Content,
+				UserID:        userID,
+				ChatID:        chatID,
+				Content:       req.Content,
+				AttachmentIDs: req.AttachmentIDs,
 			}
 			if req.E2E != nil {
 				input.SenderDeviceID = req.E2E.SenderDeviceID

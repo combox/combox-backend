@@ -59,7 +59,7 @@
 
 ### Реальное время (M4)
 
-- WebSocket: `/api/private/v1/ws?access_token=<token>`
+- WebSocket: `wss://<host>/api/private/v1/ws?access_token=<token>` (используй `ws://` только локально без TLS)
 - Подписка/отписка от потоков чата
 - Фанаут между инстансами через Valkey
 
@@ -81,6 +81,12 @@
 - JWT access токены (короткоживущие) + refresh токены (долгоживущие)
 - Сессии refresh хранятся в PostgreSQL с поддержкой отзыва
 - Аутентификация WebSocket через query параметр `access_token`
+
+Сохранение авторизации реализовано через sliding expiration для refresh-сессии:
+
+- Пользовательская настройка `users.session_idle_ttl_seconds` определяет, сколько времени пользователь может не заходить.
+- Каждый успешный `refresh` продлевает `sessions.expires_at = now + session_idle_ttl`.
+- Если пользователь не обновлял токены в пределах выбранного периода, сессия истечёт и потребуется логин.
 
 ### Авторизация
 

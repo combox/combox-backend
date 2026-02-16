@@ -17,6 +17,8 @@
   "message.list.success": "mesaje preluate",
   "message.status.upsert.success": "status actualizat",
   "message.update.success": "mesaj actualizat",
+  "message.delete.success": "mesaj șters",
+  "message.read.success": "mesaj marcat ca citit",
   "e2e.device_keys.upsert.success": "cheile dispozitivului actualizate",
   "e2e.devices.list.success": "dispozitive preluate",
   "e2e.bundle.claim.success": "bundle preluat",

@@ -17,6 +17,8 @@
   "message.list.success": "паведамленні атрыманы",
   "message.status.upsert.success": "статус абноўлены",
   "message.update.success": "паведамленне абноўлена",
+  "message.delete.success": "паведамленне выдалена",
+  "message.read.success": "паведамленне адзначана як прачытанае",
   "e2e.device_keys.upsert.success": "ключы прылады абноўлены",
   "e2e.devices.list.success": "прылады атрыманы",
   "e2e.bundle.claim.success": "bundle атрыманы",
