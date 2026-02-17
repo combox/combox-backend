@@ -168,6 +168,53 @@ func TestPrivateRouteAllowsValidBearerToken(t *testing.T) {
 	}
 }
 
+func TestPrivateBotTokenRouteRequiresAuth(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		AccessSecret:  "test-secret",
+		BotTokens:     stubBotTokenService{},
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodPost, "/api/private/v1/bot/tokens", strings.NewReader(`{"scopes":["bot:messages:read"],"chat_ids":["*"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != stdhttp.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPrivateBotTokenRouteCreate(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		AccessSecret:  "test-secret",
+		BotTokens:     stubBotTokenService{},
+	})
+
+	token := makeAccessToken(t, "u-test", "test-secret", time.Now().UTC().Add(10*time.Minute).Unix())
+	req := httptest.NewRequest(stdhttp.MethodPost, "/api/private/v1/bot/tokens", strings.NewReader(`{"name":"My bot","scopes":["bot:messages:read"],"chat_ids":["*"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != stdhttp.StatusCreated {
+		t.Fatalf("expected 201, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestPublicBotRouteRequiresBearerToken(t *testing.T) {
 	router := NewRouter(RouterDeps{
 		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -397,6 +444,8 @@ func testTranslator() mapTranslator {
 			"service.name":                     "combox-backend",
 			"error.auth.missing_user_context":  "missing user context",
 			"error.bot.invalid_token":          "invalid bot token",
+			"bot.token.create.success":         "bot token created",
+			"error.bot.invalid_token_input":    "invalid bot token input",
 			"error.bot.missing_scope":          "missing required bot scope",
 			"error.bot.chat_not_allowed":       "bot token has no access to this chat",
 			"bot.webhook.create.success":       "bot webhook created",
@@ -489,6 +538,24 @@ func (s stubBotWebhookService) Create(context.Context, botwebhooksvc.CreateInput
 		Events:      []string{"message.created"},
 		Enabled:     true,
 		CreatedAt:   time.Now().UTC(),
+	}, nil
+}
+
+type stubBotTokenService struct {
+	err error
+}
+
+func (s stubBotTokenService) GenerateToken(context.Context, botauthsvc.GenerateTokenInput) (botauthsvc.GeneratedToken, error) {
+	if s.err != nil {
+		return botauthsvc.GeneratedToken{}, s.err
+	}
+	return botauthsvc.GeneratedToken{
+		ID:        "11111111-1111-1111-1111-111111111111",
+		Name:      "My bot",
+		BotUserID: "u-test",
+		Scopes:    []string{"bot:messages:read"},
+		ChatIDs:   []string{"*"},
+		Token:     "bt_11111111-1111-1111-1111-111111111111.secret",
 	}, nil
 }
 

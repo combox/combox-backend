@@ -175,21 +175,10 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("init media service: %w", err)
 	}
 
-	var botAuthService *botauthsvc.Service
-	if len(cfg.Bot.Tokens) > 0 {
-		tokens := make([]botauthsvc.TokenConfig, 0, len(cfg.Bot.Tokens))
-		for _, tk := range cfg.Bot.Tokens {
-			tokens = append(tokens, botauthsvc.TokenConfig{
-				Token:   tk.Token,
-				UserID:  tk.UserID,
-				Scopes:  tk.Scopes,
-				ChatIDs: tk.ChatIDs,
-			})
-		}
-		botAuthService, err = botauthsvc.New(tokens)
-		if err != nil {
-			return fmt.Errorf("init bot auth service: %w", err)
-		}
+	botTokenRepo := pgrepo.NewBotTokenRepository(postgresClient)
+	botAuthService, err := botauthsvc.New(botTokenRepo, cfg.Bot.TokenPepper)
+	if err != nil {
+		return fmt.Errorf("init bot auth service: %w", err)
 	}
 	botWebhookService := botwebhooksvc.New()
 
@@ -206,6 +195,7 @@ func Run(ctx context.Context) error {
 		Media:         mediaService,
 		E2E:           e2eService,
 		BotAuth:       botAuthService,
+		BotTokens:     botAuthService,
 		BotWebhooks:   botWebhookService,
 	})
 

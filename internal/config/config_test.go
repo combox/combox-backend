@@ -15,7 +15,7 @@ func TestLoadSuccess(t *testing.T) {
 	t.Setenv("MINIO_BUCKET", "chat-media")
 	t.Setenv("MINIO_ROOT_USER", "minioadmin")
 	t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin123")
-	t.Setenv("BOT_TOKENS", "tok1|bot-user-1|bot:messages:read,bot:messages:write|*")
+	t.Setenv("BOT_TOKEN_PEPPER", "bot-token-pepper-32-chars-min")
 
 	cfg, err := Load()
 	if err != nil {
@@ -27,11 +27,8 @@ func TestLoadSuccess(t *testing.T) {
 	if cfg.Valkey.Addr != "127.0.0.1:6379" {
 		t.Fatalf("unexpected valkey addr: %s", cfg.Valkey.Addr)
 	}
-	if len(cfg.Bot.Tokens) != 1 {
-		t.Fatalf("expected 1 bot token config, got %d", len(cfg.Bot.Tokens))
-	}
-	if cfg.Bot.Tokens[0].UserID != "bot-user-1" {
-		t.Fatalf("unexpected bot user id: %s", cfg.Bot.Tokens[0].UserID)
+	if cfg.Bot.TokenPepper == "" {
+		t.Fatalf("expected bot token pepper to be set")
 	}
 }
 
@@ -46,6 +43,7 @@ func TestLoadMissingPostgresDSN(t *testing.T) {
 	t.Setenv("MINIO_BUCKET", "chat-media")
 	t.Setenv("MINIO_ROOT_USER", "minioadmin")
 	t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin123")
+	t.Setenv("BOT_TOKEN_PEPPER", "bot-token-pepper-32-chars-min")
 
 	_, err := Load()
 	if err == nil {
@@ -65,6 +63,7 @@ func TestLoadInvalidReadyTimeoutFallsBack(t *testing.T) {
 	t.Setenv("MINIO_BUCKET", "chat-media")
 	t.Setenv("MINIO_ROOT_USER", "minioadmin")
 	t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin123")
+	t.Setenv("BOT_TOKEN_PEPPER", "bot-token-pepper-32-chars-min")
 
 	cfg, err := Load()
 	if err != nil {
@@ -86,6 +85,7 @@ func TestLoadMissingAuthSecrets(t *testing.T) {
 	t.Setenv("MINIO_BUCKET", "chat-media")
 	t.Setenv("MINIO_ROOT_USER", "minioadmin")
 	t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin123")
+	t.Setenv("BOT_TOKEN_PEPPER", "bot-token-pepper-32-chars-min")
 
 	_, err := Load()
 	if err == nil {
@@ -93,7 +93,7 @@ func TestLoadMissingAuthSecrets(t *testing.T) {
 	}
 }
 
-func TestLoadInvalidBotTokensEntry(t *testing.T) {
+func TestLoadMissingBotTokenPepper(t *testing.T) {
 	t.Setenv("POSTGRES_DSN", "postgres://user:pass@localhost:5432/db?sslmode=disable")
 	t.Setenv("VALKEY_ADDR", "127.0.0.1:6379")
 	t.Setenv("DEFAULT_LOCALE", "en")
@@ -104,13 +104,10 @@ func TestLoadInvalidBotTokensEntry(t *testing.T) {
 	t.Setenv("MINIO_BUCKET", "chat-media")
 	t.Setenv("MINIO_ROOT_USER", "minioadmin")
 	t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin123")
-	t.Setenv("BOT_TOKENS", "broken-entry")
+	t.Setenv("BOT_TOKEN_PEPPER", "")
 
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if len(cfg.Bot.Tokens) != 0 {
-		t.Fatalf("expected invalid entry to be ignored")
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("expected error for missing BOT_TOKEN_PEPPER")
 	}
 }

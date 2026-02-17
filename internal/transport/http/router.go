@@ -43,6 +43,7 @@ type RouterDeps struct {
 	Media         MediaService
 	E2E           E2EService
 	BotAuth       BotAuthService
+	BotTokens     BotTokenService
 	BotWebhooks   BotWebhookService
 }
 
@@ -74,6 +75,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.Media != nil {
 		mux.HandleFunc("/api/private/v1/media/attachments", newMediaAttachmentsHandler(deps.Media, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/media/attachments/", newMediaAttachmentByIDHandler(deps.Media, deps.I18n, deps.DefaultLocale))
+	}
+	if deps.BotTokens != nil {
+		mux.HandleFunc("/api/private/v1/bot/tokens", newPrivateBotTokensHandler(deps.BotTokens, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.Chat != nil && deps.BotAuth != nil {
 		mux.HandleFunc("/api/public/v1/bot/messages", newPublicBotMessagesHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
@@ -198,6 +202,10 @@ type E2EService interface {
 
 type BotAuthService interface {
 	ValidateToken(ctx context.Context, token string) (botauthsvc.Principal, error)
+}
+
+type BotTokenService interface {
+	GenerateToken(ctx context.Context, input botauthsvc.GenerateTokenInput) (botauthsvc.GeneratedToken, error)
 }
 
 type BotWebhookService interface {
