@@ -25,6 +25,7 @@ const (
 type Config struct {
 	App        AppConfig
 	Auth       AuthConfig
+	Bot        BotConfig
 	Postgres   PostgresConfig
 	Valkey     ValkeyConfig
 	MinIO      MinIOConfig
@@ -77,6 +78,17 @@ type MigrationsConfig struct {
 	Path    string
 }
 
+type BotConfig struct {
+	Tokens []BotTokenConfig
+}
+
+type BotTokenConfig struct {
+	Token   string
+	UserID  string
+	Scopes  []string
+	ChatIDs []string
+}
+
 func Load() (Config, error) {
 	cfg := Config{
 		App: AppConfig{
@@ -98,6 +110,9 @@ func Load() (Config, error) {
 			RefreshSecret: strings.TrimSpace(os.Getenv("AUTH_REFRESH_SECRET")),
 			AccessTTL:     getDurationEnv("AUTH_ACCESS_TTL", defaultAccessTTL),
 			RefreshTTL:    getDurationEnv("AUTH_REFRESH_TTL", defaultRefreshTTL),
+		},
+		Bot: BotConfig{
+			Tokens: parseBotTokens(os.Getenv("BOT_TOKENS")),
 		},
 		Postgres: PostgresConfig{
 			DSN: strings.TrimSpace(os.Getenv("POSTGRES_DSN")),
@@ -182,6 +197,18 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.MinIO.RootPassword) == "" {
 		return errors.New("MINIO_ROOT_PASSWORD is required")
 	}
+
+	for _, token := range c.Bot.Tokens {
+		if strings.TrimSpace(token.Token) == "" || strings.TrimSpace(token.UserID) == "" {
+			return errors.New("BOT_TOKENS entries require token and user_id")
+		}
+		if len(token.Scopes) == 0 {
+			return errors.New("BOT_TOKENS entries require at least one scope")
+		}
+		if len(token.ChatIDs) == 0 {
+			return errors.New("BOT_TOKENS entries require chat ids or wildcard *")
+		}
+	}
 	return nil
 }
 
@@ -226,4 +253,52 @@ func getDurationEnv(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+func parseBotTokens(raw string) []BotTokenConfig {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	entries := strings.Split(raw, ";")
+	out := make([]BotTokenConfig, 0, len(entries))
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		parts := strings.Split(entry, "|")
+		if len(parts) != 4 {
+			continue
+		}
+
+		cfg := BotTokenConfig{
+			Token:   strings.TrimSpace(parts[0]),
+			UserID:  strings.TrimSpace(parts[1]),
+			Scopes:  splitCSV(parts[2]),
+			ChatIDs: splitCSV(parts[3]),
+		}
+		out = append(out, cfg)
+	}
+
+	return out
+}
+
+func splitCSV(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }

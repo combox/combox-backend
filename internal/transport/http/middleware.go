@@ -8,12 +8,59 @@ import (
 	"strings"
 	"time"
 
+	botauthsvc "combox-backend/internal/service/botauth"
+
 	"github.com/google/uuid"
 )
 
 type contextKey string
 
 const requestIDKey contextKey = "request_id"
+const botPrincipalKey contextKey = "bot_principal"
+
+type BotPrincipal = botauthsvc.Principal
+
+func BotPrincipalFromContext(ctx context.Context) (botauthsvc.Principal, bool) {
+	value, ok := ctx.Value(botPrincipalKey).(botauthsvc.Principal)
+	return value, ok
+}
+
+func BotAuthMiddleware(botAuth BotAuthService, i18n Translator, defaultLocale string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := r.URL.Path
+			if !strings.HasPrefix(path, "/api/public/v1/bot/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if botAuth == nil {
+				writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.bot.invalid_token", nil, i18n, defaultLocale)
+				return
+			}
+
+			authz := strings.TrimSpace(r.Header.Get("Authorization"))
+			const prefix = "Bearer "
+			if !strings.HasPrefix(authz, prefix) {
+				writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.bot.invalid_token", nil, i18n, defaultLocale)
+				return
+			}
+			token := strings.TrimSpace(strings.TrimPrefix(authz, prefix))
+			if token == "" {
+				writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.bot.invalid_token", nil, i18n, defaultLocale)
+				return
+			}
+
+			principal, err := botAuth.ValidateToken(r.Context(), token)
+			if err != nil {
+				writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.bot.invalid_token", nil, i18n, defaultLocale)
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), botPrincipalKey, principal)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
 
 func AuthMiddleware(accessSecret string, i18n Translator, defaultLocale string) func(http.Handler) http.Handler {
 	allowed := map[string]struct{}{

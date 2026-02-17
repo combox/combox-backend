@@ -9,6 +9,8 @@ import (
 	"time"
 
 	authsvc "combox-backend/internal/service/auth"
+	botauthsvc "combox-backend/internal/service/botauth"
+	botwebhooksvc "combox-backend/internal/service/botwebhook"
 	"combox-backend/internal/service/chat"
 	e2esvc "combox-backend/internal/service/e2e"
 
@@ -40,6 +42,8 @@ type RouterDeps struct {
 	Chat          ChatService
 	Media         MediaService
 	E2E           E2EService
+	BotAuth       BotAuthService
+	BotWebhooks   BotWebhookService
 }
 
 type Translator interface {
@@ -70,6 +74,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.Media != nil {
 		mux.HandleFunc("/api/private/v1/media/attachments", newMediaAttachmentsHandler(deps.Media, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/media/attachments/", newMediaAttachmentByIDHandler(deps.Media, deps.I18n, deps.DefaultLocale))
+	}
+	if deps.Chat != nil && deps.BotAuth != nil {
+		mux.HandleFunc("/api/public/v1/bot/messages", newPublicBotMessagesHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/public/v1/bot/chats/", newPublicBotChatMessagesHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+		if deps.BotWebhooks != nil {
+			mux.HandleFunc("/api/public/v1/bot/webhooks", newPublicBotWebhooksHandler(deps.BotWebhooks, deps.I18n, deps.DefaultLocale))
+		}
 	}
 	if deps.Valkey != nil {
 		mux.HandleFunc("/api/private/v1/ws", newWSHandler(deps.Valkey, deps.AccessSecret, deps.I18n, deps.DefaultLocale))
@@ -150,6 +161,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 	return chain(mux,
 		RequestIDMiddleware,
+		BotAuthMiddleware(deps.BotAuth, deps.I18n, deps.DefaultLocale),
 		AuthMiddleware(deps.AccessSecret, deps.I18n, deps.DefaultLocale),
 		RecoverMiddleware(deps.Logger),
 		AccessLogMiddleware(deps.Logger),
@@ -182,6 +194,14 @@ type E2EService interface {
 	ClaimPreKeyBundle(ctx context.Context, userID, deviceID string) (e2esvc.PreKeyBundle, error)
 	UpsertUserKeyBackup(ctx context.Context, input e2esvc.UpsertUserKeyBackupInput) (e2esvc.UserKeyBackup, error)
 	GetUserKeyBackup(ctx context.Context, userID string) (e2esvc.UserKeyBackup, error)
+}
+
+type BotAuthService interface {
+	ValidateToken(ctx context.Context, token string) (botauthsvc.Principal, error)
+}
+
+type BotWebhookService interface {
+	Create(ctx context.Context, input botwebhooksvc.CreateInput) (botwebhooksvc.Webhook, error)
 }
 
 func chain(next http.Handler, middlewares ...func(http.Handler) http.Handler) http.Handler {

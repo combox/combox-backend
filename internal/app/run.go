@@ -20,6 +20,8 @@ import (
 	pgrepo "combox-backend/internal/repository/postgres"
 	vkrepo "combox-backend/internal/repository/valkey"
 	authsvc "combox-backend/internal/service/auth"
+	botauthsvc "combox-backend/internal/service/botauth"
+	botwebhooksvc "combox-backend/internal/service/botwebhook"
 	chatsvc "combox-backend/internal/service/chat"
 	e2esvc "combox-backend/internal/service/e2e"
 	mediasvc "combox-backend/internal/service/media"
@@ -173,6 +175,24 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("init media service: %w", err)
 	}
 
+	var botAuthService *botauthsvc.Service
+	if len(cfg.Bot.Tokens) > 0 {
+		tokens := make([]botauthsvc.TokenConfig, 0, len(cfg.Bot.Tokens))
+		for _, tk := range cfg.Bot.Tokens {
+			tokens = append(tokens, botauthsvc.TokenConfig{
+				Token:   tk.Token,
+				UserID:  tk.UserID,
+				Scopes:  tk.Scopes,
+				ChatIDs: tk.ChatIDs,
+			})
+		}
+		botAuthService, err = botauthsvc.New(tokens)
+		if err != nil {
+			return fmt.Errorf("init bot auth service: %w", err)
+		}
+	}
+	botWebhookService := botwebhooksvc.New()
+
 	router := httptransport.NewRouter(httptransport.RouterDeps{
 		Logger:        logger,
 		Postgres:      postgresClient,
@@ -185,6 +205,8 @@ func Run(ctx context.Context) error {
 		Chat:          chatSvc,
 		Media:         mediaService,
 		E2E:           e2eService,
+		BotAuth:       botAuthService,
+		BotWebhooks:   botWebhookService,
 	})
 
 	httpServer := &http.Server{

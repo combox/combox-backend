@@ -15,6 +15,7 @@ func TestLoadSuccess(t *testing.T) {
 	t.Setenv("MINIO_BUCKET", "chat-media")
 	t.Setenv("MINIO_ROOT_USER", "minioadmin")
 	t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin123")
+	t.Setenv("BOT_TOKENS", "tok1|bot-user-1|bot:messages:read,bot:messages:write|*")
 
 	cfg, err := Load()
 	if err != nil {
@@ -25,6 +26,12 @@ func TestLoadSuccess(t *testing.T) {
 	}
 	if cfg.Valkey.Addr != "127.0.0.1:6379" {
 		t.Fatalf("unexpected valkey addr: %s", cfg.Valkey.Addr)
+	}
+	if len(cfg.Bot.Tokens) != 1 {
+		t.Fatalf("expected 1 bot token config, got %d", len(cfg.Bot.Tokens))
+	}
+	if cfg.Bot.Tokens[0].UserID != "bot-user-1" {
+		t.Fatalf("unexpected bot user id: %s", cfg.Bot.Tokens[0].UserID)
 	}
 }
 
@@ -83,5 +90,27 @@ func TestLoadMissingAuthSecrets(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatalf("expected error for missing auth secrets")
+	}
+}
+
+func TestLoadInvalidBotTokensEntry(t *testing.T) {
+	t.Setenv("POSTGRES_DSN", "postgres://user:pass@localhost:5432/db?sslmode=disable")
+	t.Setenv("VALKEY_ADDR", "127.0.0.1:6379")
+	t.Setenv("DEFAULT_LOCALE", "en")
+	t.Setenv("STRINGS_PATH", "strings")
+	t.Setenv("AUTH_ACCESS_SECRET", "access-secret")
+	t.Setenv("AUTH_REFRESH_SECRET", "refresh-secret")
+	t.Setenv("MINIO_API_INTERNAL", "http://minio:9000")
+	t.Setenv("MINIO_BUCKET", "chat-media")
+	t.Setenv("MINIO_ROOT_USER", "minioadmin")
+	t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin123")
+	t.Setenv("BOT_TOKENS", "broken-entry")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(cfg.Bot.Tokens) != 0 {
+		t.Fatalf("expected invalid entry to be ignored")
 	}
 }

@@ -210,6 +210,11 @@ Deliverables:
 - presigned upload URL generation
 - attachment metadata binding to message
 - bot token auth with scopes
+- public bot message endpoints baseline:
+  - `POST /api/public/v1/bot/messages`
+  - `GET /api/public/v1/bot/chats/{chat_id}/messages`
+- bot webhook registration baseline:
+  - `POST /api/public/v1/bot/webhooks`
 
 Exit criteria:
 

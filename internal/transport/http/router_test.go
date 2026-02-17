@@ -16,6 +16,8 @@ import (
 	"time"
 
 	authsvc "combox-backend/internal/service/auth"
+	botauthsvc "combox-backend/internal/service/botauth"
+	botwebhooksvc "combox-backend/internal/service/botwebhook"
 	chatsvc "combox-backend/internal/service/chat"
 
 	"github.com/redis/go-redis/v9"
@@ -166,6 +168,201 @@ func TestPrivateRouteAllowsValidBearerToken(t *testing.T) {
 	}
 }
 
+func TestPublicBotRouteRequiresBearerToken(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		Chat:          stubChatService{},
+		BotAuth:       stubBotAuthService{},
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodGet, "/api/public/v1/bot/chats/chat-1/messages", nil)
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != stdhttp.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPublicBotRouteRejectsMissingScope(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		Chat:          stubChatService{},
+		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
+			UserID:          "u-bot",
+			Scopes:          map[string]struct{}{"bot:messages:write": {}},
+			AllowedChatIDs:  map[string]struct{}{"chat-1": {}},
+			AllowAllChatIDs: false,
+		}},
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodGet, "/api/public/v1/bot/chats/chat-1/messages", nil)
+	req.Header.Set("Authorization", "Bearer tok-ok")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != stdhttp.StatusForbidden {
+		t.Fatalf("expected 403, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPublicBotRouteRejectsChatOutOfScope(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		Chat:          stubChatService{},
+		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
+			UserID:          "u-bot",
+			Scopes:          map[string]struct{}{"bot:messages:read": {}},
+			AllowedChatIDs:  map[string]struct{}{"chat-1": {}},
+			AllowAllChatIDs: false,
+		}},
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodGet, "/api/public/v1/bot/chats/chat-2/messages", nil)
+	req.Header.Set("Authorization", "Bearer tok-ok")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != stdhttp.StatusForbidden {
+		t.Fatalf("expected 403, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPublicBotRouteAllowsScopedAccess(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		Chat:          stubChatService{},
+		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
+			UserID:          "u-bot",
+			Scopes:          map[string]struct{}{"bot:messages:read": {}},
+			AllowedChatIDs:  map[string]struct{}{"chat-1": {}},
+			AllowAllChatIDs: false,
+		}},
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodGet, "/api/public/v1/bot/chats/chat-1/messages", nil)
+	req.Header.Set("Authorization", "Bearer tok-ok")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != stdhttp.StatusOK {
+		t.Fatalf("expected 200, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPublicBotWebhookRouteRejectsMissingScope(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		Chat:          stubChatService{},
+		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
+			UserID:          "u-bot",
+			Scopes:          map[string]struct{}{"bot:messages:read": {}},
+			AllowedChatIDs:  map[string]struct{}{"chat-1": {}},
+			AllowAllChatIDs: false,
+		}},
+		BotWebhooks: stubBotWebhookService{},
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodPost, "/api/public/v1/bot/webhooks", strings.NewReader(`{"endpoint_url":"https://example.com/hook","events":["message.created"]}`))
+	req.Header.Set("Authorization", "Bearer tok-ok")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusForbidden {
+		t.Fatalf("expected 403, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPublicBotWebhookRouteCreatesWebhook(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		Chat:          stubChatService{},
+		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
+			UserID:          "u-bot",
+			Scopes:          map[string]struct{}{"bot:webhooks:write": {}},
+			AllowedChatIDs:  map[string]struct{}{"*": {}},
+			AllowAllChatIDs: true,
+		}},
+		BotWebhooks: stubBotWebhookService{},
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodPost, "/api/public/v1/bot/webhooks", strings.NewReader(`{"endpoint_url":"https://example.com/hook","events":["message.created","message.read"]}`))
+	req.Header.Set("Authorization", "Bearer tok-ok")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusCreated {
+		t.Fatalf("expected 201, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPublicBotWebhookRouteReturnsConflictOnDuplicate(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		Chat:          stubChatService{},
+		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
+			UserID:          "u-bot",
+			Scopes:          map[string]struct{}{"bot:webhooks:write": {}},
+			AllowedChatIDs:  map[string]struct{}{"*": {}},
+			AllowAllChatIDs: true,
+		}},
+		BotWebhooks: stubBotWebhookService{
+			err: &botwebhooksvc.Error{Code: botwebhooksvc.CodeAlreadyExists, MessageKey: "error.bot.webhook_already_exists"},
+		},
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodPost, "/api/public/v1/bot/webhooks", strings.NewReader(`{"endpoint_url":"https://example.com/hook","events":["message.created"]}`))
+	req.Header.Set("Authorization", "Bearer tok-ok")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusConflict {
+		t.Fatalf("expected 409, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func makeAccessToken(t *testing.T, sub, secret string, exp int64) string {
 	t.Helper()
 
@@ -190,16 +387,25 @@ func makeAccessToken(t *testing.T, sub, secret string, exp int64) string {
 func testTranslator() mapTranslator {
 	return mapTranslator{values: map[string]map[string]string{
 		"en": {
-			"status.ok":                       "ok",
-			"status.running":                  "running",
-			"status.up":                       "up",
-			"status.down":                     "down",
-			"status.degraded":                 "degraded",
-			"check.postgres":                  "postgres",
-			"check.valkey":                    "valkey",
-			"service.name":                    "combox-backend",
-			"error.auth.missing_user_context": "missing user context",
-			"chat.create.success":             "chat created",
+			"status.ok":                        "ok",
+			"status.running":                   "running",
+			"status.up":                        "up",
+			"status.down":                      "down",
+			"status.degraded":                  "degraded",
+			"check.postgres":                   "postgres",
+			"check.valkey":                     "valkey",
+			"service.name":                     "combox-backend",
+			"error.auth.missing_user_context":  "missing user context",
+			"error.bot.invalid_token":          "invalid bot token",
+			"error.bot.missing_scope":          "missing required bot scope",
+			"error.bot.chat_not_allowed":       "bot token has no access to this chat",
+			"bot.webhook.create.success":       "bot webhook created",
+			"error.bot.invalid_webhook_input":  "invalid bot webhook input",
+			"error.bot.invalid_webhook_url":    "invalid bot webhook url",
+			"error.bot.invalid_webhook_event":  "invalid bot webhook event",
+			"error.bot.webhook_already_exists": "bot webhook already exists",
+			"chat.create.success":              "chat created",
+			"bot.message.list.success":         "bot messages fetched",
 		},
 		"ru": {
 			"status.ok": "ок",
@@ -251,6 +457,39 @@ func (stubChatService) MarkMessageReadByID(context.Context, string, string) (cha
 
 type stubAuthService struct {
 	registerErr error
+}
+
+type stubBotAuthService struct {
+	principal botauthsvc.Principal
+	err       error
+}
+
+func (s stubBotAuthService) ValidateToken(context.Context, string) (botauthsvc.Principal, error) {
+	if s.err != nil {
+		return botauthsvc.Principal{}, s.err
+	}
+	if strings.TrimSpace(s.principal.UserID) == "" {
+		return botauthsvc.Principal{}, errors.New("invalid token")
+	}
+	return s.principal, nil
+}
+
+type stubBotWebhookService struct {
+	err error
+}
+
+func (s stubBotWebhookService) Create(context.Context, botwebhooksvc.CreateInput) (botwebhooksvc.Webhook, error) {
+	if s.err != nil {
+		return botwebhooksvc.Webhook{}, s.err
+	}
+	return botwebhooksvc.Webhook{
+		ID:          "wh-1",
+		BotUserID:   "u-bot",
+		EndpointURL: "https://example.com/hook",
+		Events:      []string{"message.created"},
+		Enabled:     true,
+		CreatedAt:   time.Now().UTC(),
+	}, nil
 }
 
 func (s stubAuthService) Register(context.Context, authsvc.RegisterInput) (authsvc.User, authsvc.Tokens, error) {
