@@ -30,9 +30,9 @@ docker-run:
 	$(DOCKER) run --rm --env-file .env -p 8080:8080 $(IMAGE)
 
 edge-up:
-	@chmod +x ../chat-edge/scripts/init-mtls.sh
-	@../chat-edge/scripts/init-mtls.sh init >/dev/null 2>&1 || true
-	@../chat-edge/scripts/init-mtls.sh issue-server combox-backend >/dev/null 2>&1 || true
+	@chmod +x ../combox-edge/scripts/init-mtls.sh
+	@../combox-edge/scripts/init-mtls.sh init >/dev/null 2>&1 || true
+	@../combox-edge/scripts/init-mtls.sh issue-server combox-backend >/dev/null 2>&1 || true
 	$(EDGE_DC) up -d --build
 
 edge-down:
