@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -10,9 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -47,6 +51,11 @@ type User struct {
 	Email                 string
 	Username              string
 	PasswordHash          string
+	FirstName             string
+	LastName              *string
+	BirthDate             *string
+	AvatarDataURL         *string
+	AvatarGradient        *string
 	SessionIdleTTLSeconds *int64
 }
 
@@ -58,9 +67,14 @@ type Session struct {
 }
 
 type CreateUserInput struct {
-	Email        string
-	Username     string
-	PasswordHash string
+	Email          string
+	Username       string
+	PasswordHash   string
+	FirstName      string
+	LastName       *string
+	BirthDate      *string
+	AvatarDataURL  *string
+	AvatarGradient *string
 }
 
 type CreateSessionInput struct {
@@ -86,6 +100,11 @@ type SessionRepository interface {
 	DeleteByID(ctx context.Context, sessionID string) error
 }
 
+type AvatarStore interface {
+	PutObject(ctx context.Context, objectKey, contentType string, body io.Reader, size int64) error
+	PresignGetObject(ctx context.Context, objectKey string, expires time.Duration) (string, error)
+}
+
 var (
 	ErrUserNotFound    = errors.New("user not found")
 	ErrSessionNotFound = errors.New("session not found")
@@ -100,11 +119,16 @@ type Tokens struct {
 }
 
 type RegisterInput struct {
-	Email     string
-	Username  string
-	Password  string
-	UserAgent string
-	IPAddress string
+	Email          string
+	Username       string
+	Password       string
+	FirstName      string
+	LastName       *string
+	BirthDate      *string
+	AvatarDataURL  *string
+	AvatarGradient *string
+	UserAgent      string
+	IPAddress      string
 }
 
 type LoginInput struct {
@@ -127,21 +151,30 @@ type LogoutInput struct {
 type Service struct {
 	users         UserRepository
 	sessions      SessionRepository
+	avatars       AvatarStore
 	accessSecret  string
 	refreshSecret string
 	accessTTL     time.Duration
 	refreshTTL    time.Duration
+	avatarURLTTL  time.Duration
 	nowFn         func() time.Time
 }
 
 type Config struct {
 	Users         UserRepository
 	Sessions      SessionRepository
+	Avatars       AvatarStore
 	AccessSecret  string
 	RefreshSecret string
 	AccessTTL     time.Duration
 	RefreshTTL    time.Duration
+	AvatarURLTTL  time.Duration
 }
+
+const (
+	defaultAvatarURLTTL = 24 * time.Hour * 7
+	avatarRefPrefix     = "s3key:"
+)
 
 func New(cfg Config) (*Service, error) {
 	if cfg.Users == nil {
@@ -162,14 +195,19 @@ func New(cfg Config) (*Service, error) {
 	if cfg.RefreshTTL <= 0 {
 		return nil, errors.New("refresh ttl must be positive")
 	}
+	if cfg.AvatarURLTTL <= 0 {
+		cfg.AvatarURLTTL = defaultAvatarURLTTL
+	}
 
 	return &Service{
 		users:         cfg.Users,
 		sessions:      cfg.Sessions,
+		avatars:       cfg.Avatars,
 		accessSecret:  cfg.AccessSecret,
 		refreshSecret: cfg.RefreshSecret,
 		accessTTL:     cfg.AccessTTL,
 		refreshTTL:    cfg.RefreshTTL,
+		avatarURLTTL:  cfg.AvatarURLTTL,
 		nowFn:         time.Now,
 	}, nil
 }
@@ -178,12 +216,53 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (User, Toke
 	email := strings.TrimSpace(strings.ToLower(input.Email))
 	username := strings.TrimSpace(input.Username)
 	password := strings.TrimSpace(input.Password)
+	firstName := strings.TrimSpace(input.FirstName)
+	var lastName *string
+	if input.LastName != nil {
+		v := strings.TrimSpace(*input.LastName)
+		if v != "" {
+			lastName = &v
+		}
+	}
+	var birthDate *string
+	if input.BirthDate != nil {
+		v := strings.TrimSpace(*input.BirthDate)
+		if v != "" {
+			birthDate = &v
+		}
+	}
+	var avatarDataURL *string
+	if input.AvatarDataURL != nil {
+		v := strings.TrimSpace(*input.AvatarDataURL)
+		if v != "" {
+			avatarDataURL = &v
+		}
+	}
+	var avatarGradient *string
+	if input.AvatarGradient != nil {
+		v := strings.TrimSpace(*input.AvatarGradient)
+		if v != "" {
+			avatarGradient = &v
+		}
+	}
 
-	if email == "" || username == "" || password == "" {
+	if email == "" || username == "" || password == "" || firstName == "" {
 		return User{}, Tokens{}, &Error{
 			Code:       CodeInvalidArgument,
 			MessageKey: "error.auth.invalid_input",
 		}
+	}
+	if avatarDataURL != nil && s.avatars != nil {
+		objectKey, err := s.uploadAvatarDataURL(ctx, *avatarDataURL)
+		if err != nil {
+			return User{}, Tokens{}, &Error{
+				Code:       CodeInternal,
+				MessageKey: "error.internal",
+				Cause:      err,
+			}
+		}
+		ref := avatarRefPrefix + objectKey
+		avatarDataURL = &ref
 	}
 
 	passwordHashBytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -196,9 +275,14 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (User, Toke
 	}
 
 	user, err := s.users.Create(ctx, CreateUserInput{
-		Email:        email,
-		Username:     username,
-		PasswordHash: string(passwordHashBytes),
+		Email:          email,
+		Username:       username,
+		PasswordHash:   string(passwordHashBytes),
+		FirstName:      firstName,
+		LastName:       lastName,
+		BirthDate:      birthDate,
+		AvatarDataURL:  avatarDataURL,
+		AvatarGradient: avatarGradient,
 	})
 	if err != nil {
 		if errors.Is(err, ErrEmailTaken) || errors.Is(err, ErrUsernameTaken) {
@@ -214,6 +298,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (User, Toke
 			Cause:      err,
 		}
 	}
+	s.resolveAvatarURL(ctx, &user)
 
 	idleTTL := s.refreshTTL
 	if user.SessionIdleTTLSeconds != nil {
@@ -259,6 +344,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (User, Tokens, er
 			Cause:      err,
 		}
 	}
+	s.resolveAvatarURL(ctx, &user)
 
 	idleTTL := s.refreshTTL
 	if user.SessionIdleTTLSeconds != nil {
@@ -390,15 +476,31 @@ func (s *Service) Logout(ctx context.Context, input LogoutInput) error {
 	return nil
 }
 
-func (s *Service) issueSessionTokens(ctx context.Context, userID, userAgent, ipAddress string, idleTTL time.Duration) (Tokens, error) {
-	sessionID, err := newRandomToken(16)
-	if err != nil {
-		return Tokens{}, &Error{
-			Code:       CodeInternal,
-			MessageKey: "error.internal",
-			Cause:      err,
+func (s *Service) EmailExists(ctx context.Context, email string) (bool, error) {
+	email = strings.TrimSpace(strings.ToLower(email))
+	if email == "" {
+		return false, &Error{
+			Code:       CodeInvalidArgument,
+			MessageKey: "error.auth.invalid_input",
 		}
 	}
+
+	_, err := s.users.FindByLogin(ctx, email)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, ErrUserNotFound) {
+		return false, nil
+	}
+	return false, &Error{
+		Code:       CodeInternal,
+		MessageKey: "error.internal",
+		Cause:      err,
+	}
+}
+
+func (s *Service) issueSessionTokens(ctx context.Context, userID, userAgent, ipAddress string, idleTTL time.Duration) (Tokens, error) {
+	sessionID := uuid.NewString()
 
 	refreshPart, err := newRandomToken(32)
 	if err != nil {
@@ -483,4 +585,90 @@ func newRandomToken(size int) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func (s *Service) resolveAvatarURL(ctx context.Context, user *User) {
+	if s.avatars == nil || user == nil || user.AvatarDataURL == nil {
+		return
+	}
+	ref := strings.TrimSpace(*user.AvatarDataURL)
+	if !strings.HasPrefix(ref, avatarRefPrefix) {
+		return
+	}
+	objectKey := strings.TrimPrefix(ref, avatarRefPrefix)
+	if strings.TrimSpace(objectKey) == "" {
+		return
+	}
+	presigned, err := s.avatars.PresignGetObject(ctx, objectKey, s.avatarURLTTL)
+	if err != nil || strings.TrimSpace(presigned) == "" {
+		return
+	}
+	user.AvatarDataURL = &presigned
+}
+
+func (s *Service) uploadAvatarDataURL(ctx context.Context, raw string) (string, error) {
+	contentType, payload, err := decodeDataURL(raw)
+	if err != nil {
+		return "", err
+	}
+	ext := extensionByContentType(contentType)
+	objectKey := fmt.Sprintf("avatars/%s%s", uuid.NewString(), ext)
+	if err := s.avatars.PutObject(ctx, objectKey, contentType, bytes.NewReader(payload), int64(len(payload))); err != nil {
+		return "", err
+	}
+	return objectKey, nil
+}
+
+func decodeDataURL(raw string) (string, []byte, error) {
+	value := strings.TrimSpace(raw)
+	if !strings.HasPrefix(strings.ToLower(value), "data:") {
+		return "", nil, errors.New("avatar must be data url")
+	}
+	commaIdx := strings.Index(value, ",")
+	if commaIdx <= 5 {
+		return "", nil, errors.New("invalid data url")
+	}
+	meta := value[5:commaIdx]
+	dataPart := value[commaIdx+1:]
+	parts := strings.Split(meta, ";")
+	contentType := strings.TrimSpace(parts[0])
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	isBase64 := false
+	for _, part := range parts[1:] {
+		if strings.EqualFold(strings.TrimSpace(part), "base64") {
+			isBase64 = true
+			break
+		}
+	}
+	if isBase64 {
+		payload, err := base64.StdEncoding.DecodeString(dataPart)
+		if err != nil {
+			return "", nil, err
+		}
+		return contentType, payload, nil
+	}
+	decoded, err := url.QueryUnescape(dataPart)
+	if err != nil {
+		return "", nil, err
+	}
+	return contentType, []byte(decoded), nil
+}
+
+func extensionByContentType(contentType string) string {
+	switch strings.ToLower(strings.TrimSpace(contentType)) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	case "image/svg+xml":
+		return ".svg"
+	default:
+		return ".bin"
+	}
 }

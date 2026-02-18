@@ -202,9 +202,10 @@ func newMediaAttachmentByIDHandler(svc MediaService, i18n Translator, defaultLoc
 			}
 			locale := requestLocale(r, defaultLocale)
 			writeJSON(w, http.StatusOK, map[string]any{
-				"message":    i18n.Translate(locale, "media.attachment.get.success"),
-				"attachment": out.Attachment,
-				"url":        out.URL,
+				"message":     i18n.Translate(locale, "media.attachment.get.success"),
+				"attachment":  out.Attachment,
+				"url":         out.URL,
+				"preview_url": out.PreviewURL,
 			})
 		default:
 			writeMethodNotAllowed(w, r, i18n, defaultLocale)

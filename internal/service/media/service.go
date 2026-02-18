@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -97,6 +98,7 @@ type Repository interface {
 	CreateAttachment(ctx context.Context, a Attachment) (Attachment, error)
 	GetAttachment(ctx context.Context, id string) (Attachment, error)
 	SetAttachmentUploadID(ctx context.Context, id string, uploadID string) error
+	SetProcessing(ctx context.Context, id string, status string, processingError *string, previewObjectKey *string, processedAt *time.Time) error
 }
 
 type ObjectStore interface {
@@ -105,6 +107,8 @@ type ObjectStore interface {
 	PresignUploadPart(ctx context.Context, objectKey, uploadID string, partNumber int, expires time.Duration) (string, error)
 	CompleteMultipartUpload(ctx context.Context, objectKey, uploadID string, parts []CompletePart, contentType string) error
 	PresignGetObject(ctx context.Context, objectKey string, expires time.Duration) (string, error)
+	GetObject(ctx context.Context, objectKey string) (io.ReadCloser, error)
+	PutObject(ctx context.Context, objectKey, contentType string, body io.Reader, size int64) error
 }
 
 type Service struct {
@@ -113,6 +117,37 @@ type Service struct {
 }
 
 var ErrAttachmentNotFound = errors.New("attachment not found")
+
+var allowedStreamMIMEs = map[string]struct{}{
+	"video/mp4":       {},
+	"video/quicktime": {},
+	"video/x-m4v":     {},
+	"video/webm":      {},
+	"video/ogg":       {},
+	"audio/mpeg":      {},
+	"audio/mp3":       {},
+	"audio/aac":       {},
+	"audio/mp4":       {},
+	"audio/m4a":       {},
+	"audio/ogg":       {},
+	"audio/opus":      {},
+	"audio/flac":      {},
+	"audio/x-flac":    {},
+	"audio/midi":      {},
+	"audio/mid":       {},
+	"audio/x-midi":    {},
+	"audio/x-mid":     {},
+	"audio/wav":       {},
+	"audio/x-wav":     {},
+	"audio/wave":      {},
+	"audio/webm":      {},
+	"application/ogg": {},
+}
+
+var mkvMIMEs = map[string]struct{}{
+	"video/x-matroska": {},
+	"video/mkv":        {},
+}
 
 func New(repo Repository, store ObjectStore) (*Service, error) {
 	if repo == nil {
@@ -135,6 +170,14 @@ func (s *Service) CreateAttachment(ctx context.Context, input CreateAttachmentIn
 	}
 	if userID == "" || filename == "" || mime == "" || kind == "" {
 		return CreateAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+	}
+	if _, isMKV := mkvMIMEs[strings.ToLower(mime)]; isMKV && strings.EqualFold(kind, "video") {
+		return CreateAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.mkv_as_file_only"}
+	}
+	if (strings.HasPrefix(mime, "video/") || strings.HasPrefix(mime, "audio/") || mime == "application/ogg") && !strings.EqualFold(kind, "file") {
+		if _, ok := allowedStreamMIMEs[strings.ToLower(mime)]; !ok {
+			return CreateAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.unsupported_mime"}
+		}
 	}
 	if input.PartsCount <= 0 || input.PartsCount > 10000 {
 		return CreateAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
@@ -240,12 +283,15 @@ func (s *Service) CompleteMultipart(ctx context.Context, requesterUserID, attach
 	if err := s.store.CompleteMultipartUpload(ctx, a.ObjectKey, uploadID, parts, a.MimeType); err != nil {
 		return Attachment{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
 	}
+
+	go s.processPreviewAsync(context.Background(), a)
 	return a, nil
 }
 
 type GetAttachmentOutput struct {
 	Attachment Attachment `json:"attachment"`
 	URL        string     `json:"url"`
+	PreviewURL *string    `json:"preview_url,omitempty"`
 }
 
 func (s *Service) GetAttachment(ctx context.Context, requesterUserID, attachmentID string) (GetAttachmentOutput, error) {
@@ -271,5 +317,13 @@ func (s *Service) GetAttachment(ctx context.Context, requesterUserID, attachment
 		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
 	}
 
-	return GetAttachmentOutput{Attachment: a, URL: urlStr}, nil
+	var previewURL *string
+	if a.PreviewObjectKey != nil && strings.TrimSpace(*a.PreviewObjectKey) != "" {
+		u, previewErr := s.store.PresignGetObject(ctx, strings.TrimSpace(*a.PreviewObjectKey), 15*time.Minute)
+		if previewErr == nil {
+			previewURL = &u
+		}
+	}
+
+	return GetAttachmentOutput{Attachment: a, URL: urlStr, PreviewURL: previewURL}, nil
 }

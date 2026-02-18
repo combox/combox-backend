@@ -20,6 +20,7 @@ const (
 	defaultMigrationsPath  = "migrations"
 	defaultAccessTTL       = 15 * time.Minute
 	defaultRefreshTTL      = 24 * time.Hour * 30
+	defaultEmailCodeTTL    = 10 * time.Minute
 )
 
 type Config struct {
@@ -56,6 +57,16 @@ type AuthConfig struct {
 	RefreshSecret string
 	AccessTTL     time.Duration
 	RefreshTTL    time.Duration
+	EmailVerify   AuthEmailVerifyConfig
+}
+
+type AuthEmailVerifyConfig struct {
+	Enabled      bool
+	ResendAPIKey string
+	ResendFrom   string
+	ResendBase   string
+	CodeTTL      time.Duration
+	MaxAttempts  int
 }
 
 type ValkeyConfig struct {
@@ -103,6 +114,14 @@ func Load() (Config, error) {
 			RefreshSecret: strings.TrimSpace(os.Getenv("AUTH_REFRESH_SECRET")),
 			AccessTTL:     getDurationEnv("AUTH_ACCESS_TTL", defaultAccessTTL),
 			RefreshTTL:    getDurationEnv("AUTH_REFRESH_TTL", defaultRefreshTTL),
+			EmailVerify: AuthEmailVerifyConfig{
+				Enabled:      getBoolEnv("AUTH_EMAIL_VERIFY_ENABLED", false),
+				ResendAPIKey: strings.TrimSpace(os.Getenv("RESEND_API_KEY")),
+				ResendFrom:   strings.TrimSpace(os.Getenv("RESEND_FROM")),
+				ResendBase:   strings.TrimSpace(os.Getenv("RESEND_BASE_URL")),
+				CodeTTL:      getDurationEnv("AUTH_EMAIL_CODE_TTL", defaultEmailCodeTTL),
+				MaxAttempts:  getIntEnv("AUTH_EMAIL_CODE_MAX_ATTEMPTS", 5),
+			},
 		},
 		Bot: BotConfig{
 			TokenPepper: strings.TrimSpace(os.Getenv("BOT_TOKEN_PEPPER")),
@@ -177,6 +196,20 @@ func (c Config) Validate() error {
 	}
 	if c.Auth.RefreshTTL <= 0 {
 		return errors.New("AUTH_REFRESH_TTL must be positive")
+	}
+	if c.Auth.EmailVerify.Enabled {
+		if strings.TrimSpace(c.Auth.EmailVerify.ResendAPIKey) == "" {
+			return errors.New("RESEND_API_KEY is required when AUTH_EMAIL_VERIFY_ENABLED=true")
+		}
+		if strings.TrimSpace(c.Auth.EmailVerify.ResendFrom) == "" {
+			return errors.New("RESEND_FROM is required when AUTH_EMAIL_VERIFY_ENABLED=true")
+		}
+		if c.Auth.EmailVerify.CodeTTL <= 0 {
+			return errors.New("AUTH_EMAIL_CODE_TTL must be positive")
+		}
+		if c.Auth.EmailVerify.MaxAttempts <= 0 {
+			return errors.New("AUTH_EMAIL_CODE_MAX_ATTEMPTS must be positive")
+		}
 	}
 	if strings.TrimSpace(c.MinIO.APIInternal) == "" {
 		return errors.New("MINIO_API_INTERNAL is required")

@@ -13,6 +13,7 @@ import (
 	botwebhooksvc "combox-backend/internal/service/botwebhook"
 	"combox-backend/internal/service/chat"
 	e2esvc "combox-backend/internal/service/e2e"
+	emailcodesvc "combox-backend/internal/service/emailcode"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -39,6 +40,7 @@ type RouterDeps struct {
 	DefaultLocale string
 	AccessSecret  string
 	Auth          AuthService
+	EmailCode     EmailCodeService
 	Chat          ChatService
 	Media         MediaService
 	E2E           E2EService
@@ -62,8 +64,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 	mux := http.NewServeMux()
 
 	if deps.Auth != nil {
+		mux.HandleFunc("/api/private/v1/auth/email-exists", newEmailExistsHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/auth/email-code/send", newEmailCodeSendHandler(deps.EmailCode, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/auth/email-code/verify", newEmailCodeVerifyHandler(deps.EmailCode, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/auth/register", newRegisterHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
-		mux.HandleFunc("/api/private/v1/auth/login", newLoginHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/auth/login", newLoginHandler(deps.Auth, deps.EmailCode, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/auth/refresh", newRefreshHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/auth/logout", newLogoutHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
 	}
@@ -173,10 +178,20 @@ func NewRouter(deps RouterDeps) http.Handler {
 }
 
 type AuthService interface {
+	EmailExists(ctx context.Context, email string) (bool, error)
 	Register(ctx context.Context, input authsvc.RegisterInput) (authsvc.User, authsvc.Tokens, error)
 	Login(ctx context.Context, input authsvc.LoginInput) (authsvc.User, authsvc.Tokens, error)
 	Refresh(ctx context.Context, input authsvc.RefreshInput) (authsvc.Tokens, error)
 	Logout(ctx context.Context, input authsvc.LogoutInput) error
+}
+
+type EmailCodeService interface {
+	SendCode(ctx context.Context, email, locale string) error
+	VerifyCode(ctx context.Context, email, code string) (bool, error)
+	ConsumeVerified(ctx context.Context, email string) (bool, error)
+	IssueLoginKey(ctx context.Context, email string) (string, error)
+	ValidateLoginKey(ctx context.Context, email, key string) (bool, error)
+	ConsumeLoginKey(ctx context.Context, email, key string) (bool, error)
 }
 
 type ChatService interface {
@@ -212,6 +227,8 @@ type BotWebhookService interface {
 	Create(ctx context.Context, input botwebhooksvc.CreateInput) (botwebhooksvc.Webhook, error)
 }
 
+var _ EmailCodeService = (*emailcodesvc.Service)(nil)
+
 func chain(next http.Handler, middlewares ...func(http.Handler) http.Handler) http.Handler {
 	for i := len(middlewares) - 1; i >= 0; i-- {
 		next = middlewares[i](next)
@@ -227,11 +244,18 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func requestLocale(r *http.Request, fallback string) string {
-	value := strings.TrimSpace(r.Header.Get("Accept-Language"))
-	if value == "" {
-		return fallback
+	if value := strings.TrimSpace(r.Header.Get("X-Client-Locale")); value != "" {
+		return value
 	}
-	return value
+	if value := strings.TrimSpace(r.Header.Get("Accept-Language")); value != "" {
+		return value
+	}
+	if c, err := r.Cookie("language"); err == nil {
+		if value := strings.TrimSpace(c.Value); value != "" {
+			return value
+		}
+	}
+	return fallback
 }
 
 type passthroughTranslator struct{}

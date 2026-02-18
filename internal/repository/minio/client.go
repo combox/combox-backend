@@ -2,6 +2,7 @@ package minio
 
 import (
 	"context"
+	"io"
 	"net/url"
 	"strconv"
 	"strings"
@@ -101,4 +102,24 @@ func (c *Client) PresignGetObject(ctx context.Context, objectKey string, expires
 		return "", err
 	}
 	return u.String(), nil
+}
+
+func (c *Client) GetObject(ctx context.Context, objectKey string) (io.ReadCloser, error) {
+	if c == nil || c.c == nil {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	obj, err := c.c.GetObject(ctx, c.bucket, strings.TrimSpace(objectKey), minio.GetObjectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
+func (c *Client) PutObject(ctx context.Context, objectKey, contentType string, body io.Reader, size int64) error {
+	if c == nil || c.c == nil {
+		return nil
+	}
+	opts := minio.PutObjectOptions{ContentType: strings.TrimSpace(contentType)}
+	_, err := c.c.PutObject(ctx, c.bucket, strings.TrimSpace(objectKey), body, size, opts)
+	return err
 }

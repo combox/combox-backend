@@ -8,21 +8,50 @@ import (
 
 type memRepo struct {
 	tokens map[string]StoredToken
+	bots   map[string]Bot
 }
 
 func newMemRepo() *memRepo {
-	return &memRepo{tokens: map[string]StoredToken{}}
+	return &memRepo{
+		tokens: map[string]StoredToken{},
+		bots:   map[string]Bot{},
+	}
+}
+
+func (r *memRepo) EnsureUserBot(_ context.Context, ownerUserID, _ string) (Bot, error) {
+	if bot, ok := r.bots[ownerUserID]; ok {
+		return bot, nil
+	}
+	bot := Bot{
+		ID:          "22222222-2222-2222-2222-222222222222",
+		OwnerUserID: ownerUserID,
+		ActorUserID: ownerUserID,
+	}
+	r.bots[ownerUserID] = bot
+	return bot, nil
 }
 
 func (r *memRepo) Create(_ context.Context, input CreateTokenRecordInput) (StoredToken, error) {
 	id := "11111111-1111-1111-1111-111111111111"
+	bot := Bot{}
+	for _, candidate := range r.bots {
+		if candidate.ID == input.BotID {
+			bot = candidate
+			break
+		}
+	}
+	if bot.ID == "" {
+		bot = Bot{ID: input.BotID, OwnerUserID: "bot-owner-1", ActorUserID: "bot-owner-1"}
+	}
 	out := StoredToken{
-		ID:         id,
-		BotUserID:  input.BotUserID,
-		SecretHash: input.SecretHash,
-		Scopes:     append([]string(nil), input.Scopes...),
-		ChatIDs:    append([]string(nil), input.ChatIDs...),
-		ExpiresAt:  input.ExpiresAt,
+		ID:          id,
+		BotID:       input.BotID,
+		OwnerUserID: bot.OwnerUserID,
+		ActorUserID: bot.ActorUserID,
+		SecretHash:  input.SecretHash,
+		Scopes:      append([]string(nil), input.Scopes...),
+		ChatIDs:     append([]string(nil), input.ChatIDs...),
+		ExpiresAt:   input.ExpiresAt,
 	}
 	r.tokens[id] = out
 	return out, nil
@@ -51,9 +80,9 @@ func TestGenerateAndValidateTokenSuccess(t *testing.T) {
 	}
 
 	generated, err := svc.GenerateToken(context.Background(), GenerateTokenInput{
-		BotUserID: "bot-user-1",
-		Scopes:    []string{"bot:messages:read"},
-		ChatIDs:   []string{"*"},
+		OwnerUserID: "bot-owner-1",
+		Scopes:      []string{"bot:messages:read"},
+		ChatIDs:     []string{"*"},
 	})
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
@@ -66,7 +95,7 @@ func TestGenerateAndValidateTokenSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validate token: %v", err)
 	}
-	if principal.UserID != "bot-user-1" {
+	if principal.UserID != "bot-owner-1" {
 		t.Fatalf("unexpected user id: %s", principal.UserID)
 	}
 	if !principal.HasScope("bot:messages:read") {

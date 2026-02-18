@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"combox-backend/internal/service/media"
 
@@ -143,5 +144,27 @@ func (r *MediaRepository) SetAttachmentUploadID(ctx context.Context, id string, 
 		WHERE id = $1::uuid
 	`
 	_, err := r.client.pool.Exec(ctx, q, strings.TrimSpace(id), strings.TrimSpace(uploadID))
+	return err
+}
+
+func (r *MediaRepository) SetProcessing(ctx context.Context, id string, status string, processingError *string, previewObjectKey *string, processedAt *time.Time) error {
+	const q = `
+		UPDATE attachments
+		SET processing_status = $2,
+		    processing_error = $3,
+		    preview_object_key = $4,
+		    processed_at = $5,
+		    updated_at = NOW()
+		WHERE id = $1::uuid
+	`
+	_, err := r.client.pool.Exec(
+		ctx,
+		q,
+		strings.TrimSpace(id),
+		strings.TrimSpace(status),
+		processingError,
+		previewObjectKey,
+		processedAt,
+	)
 	return err
 }

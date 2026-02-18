@@ -550,12 +550,13 @@ func (s stubBotTokenService) GenerateToken(context.Context, botauthsvc.GenerateT
 		return botauthsvc.GeneratedToken{}, s.err
 	}
 	return botauthsvc.GeneratedToken{
-		ID:        "11111111-1111-1111-1111-111111111111",
-		Name:      "My bot",
-		BotUserID: "u-test",
-		Scopes:    []string{"bot:messages:read"},
-		ChatIDs:   []string{"*"},
-		Token:     "bt_11111111-1111-1111-1111-111111111111.secret",
+		ID:          "11111111-1111-1111-1111-111111111111",
+		Name:        "My bot",
+		BotID:       "22222222-2222-2222-2222-222222222222",
+		OwnerUserID: "u-test",
+		Scopes:      []string{"bot:messages:read"},
+		ChatIDs:     []string{"*"},
+		Token:       "bt_11111111-1111-1111-1111-111111111111.secret",
 	}, nil
 }
 
@@ -572,6 +573,10 @@ func (s stubAuthService) Register(context.Context, authsvc.RegisterInput) (auths
 			RefreshToken: "r",
 			ExpiresInSec: 900,
 		}, nil
+}
+
+func (s stubAuthService) EmailExists(context.Context, string) (bool, error) {
+	return false, nil
 }
 
 func (s stubAuthService) Login(context.Context, authsvc.LoginInput) (authsvc.User, authsvc.Tokens, error) {

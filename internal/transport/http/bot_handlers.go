@@ -27,7 +27,7 @@ func newPublicBotMessagesHandler(chat ChatService, i18n Translator, defaultLocal
 		}
 
 		principal, ok := BotPrincipalFromContext(r.Context())
-		if !ok || strings.TrimSpace(principal.UserID) == "" {
+		if !ok || strings.TrimSpace(principal.BotID) == "" {
 			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.bot.invalid_token", nil, i18n, defaultLocale)
 			return
 		}
@@ -52,7 +52,7 @@ func newPublicBotMessagesHandler(chat ChatService, i18n Translator, defaultLocal
 		}
 
 		created, err := chat.CreateMessage(r.Context(), chatsvc.CreateMessageInput{
-			UserID:        principal.UserID,
+			BotID:         principal.BotID,
 			ChatID:        chatID,
 			Content:       req.Content,
 			AttachmentIDs: req.AttachmentIDs,

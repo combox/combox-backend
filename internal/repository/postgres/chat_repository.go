@@ -19,7 +19,7 @@ type ChatRepository struct {
 
 func (r *MessageRepository) GetMessageMeta(ctx context.Context, messageID string) (chat.MessageMeta, error) {
 	const query = `
-		SELECT id::text, chat_id::text, user_id::text, is_e2e
+		SELECT id::text, chat_id::text, COALESCE(user_id::text, ''), sender_bot_id::text, is_e2e
 		FROM messages
 		WHERE id = $1::uuid
 		  AND deleted_at IS NULL
@@ -27,7 +27,7 @@ func (r *MessageRepository) GetMessageMeta(ctx context.Context, messageID string
 	`
 
 	var meta chat.MessageMeta
-	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(messageID)).Scan(&meta.ID, &meta.ChatID, &meta.UserID, &meta.IsE2E); err != nil {
+	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(messageID)).Scan(&meta.ID, &meta.ChatID, &meta.UserID, &meta.SenderBotID, &meta.IsE2E); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chat.MessageMeta{}, chat.ErrMessageNotFound
 		}
@@ -202,16 +202,37 @@ func (r *MessageRepository) CreateMessage(ctx context.Context, chatID, userID, c
 	const query = `
 		INSERT INTO messages (chat_id, user_id, content)
 		VALUES ($1::uuid, $2::uuid, $3)
-		RETURNING id::text, chat_id::text, user_id::text, content, is_e2e, created_at, edited_at
+		RETURNING id::text, chat_id::text, COALESCE(user_id::text, ''), sender_bot_id::text, content, is_e2e, created_at, edited_at
 	`
 	var msg chat.Message
 	err := r.client.pool.QueryRow(ctx, query, chatID, userID, content).
-		Scan(&msg.ID, &msg.ChatID, &msg.UserID, &msg.Content, &msg.IsE2E, &msg.CreatedAt, &msg.EditedAt)
+		Scan(&msg.ID, &msg.ChatID, &msg.UserID, &msg.SenderBotID, &msg.Content, &msg.IsE2E, &msg.CreatedAt, &msg.EditedAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "violates foreign key constraint") {
 			return chat.Message{}, chat.ErrChatNotFound
 		}
 		return chat.Message{}, err
+	}
+	return msg, nil
+}
+
+func (r *MessageRepository) CreateMessageAsBot(ctx context.Context, chatID, botID, content string) (chat.Message, error) {
+	const query = `
+		INSERT INTO messages (chat_id, sender_bot_id, content)
+		VALUES ($1::uuid, $2::uuid, $3)
+		RETURNING id::text, chat_id::text, COALESCE(user_id::text, ''), sender_bot_id::text, content, is_e2e, created_at, edited_at
+	`
+	var msg chat.Message
+	err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(botID), content).
+		Scan(&msg.ID, &msg.ChatID, &msg.UserID, &msg.SenderBotID, &msg.Content, &msg.IsE2E, &msg.CreatedAt, &msg.EditedAt)
+	if err != nil {
+		if strings.Contains(err.Error(), "violates foreign key constraint") {
+			return chat.Message{}, chat.ErrChatNotFound
+		}
+		return chat.Message{}, err
+	}
+	if strings.TrimSpace(msg.UserID) == "" && msg.SenderBotID != nil {
+		msg.UserID = "bot:" + strings.TrimSpace(*msg.SenderBotID)
 	}
 	return msg, nil
 }
@@ -242,11 +263,11 @@ func (r *MessageRepository) CreateMessageWithAttachments(ctx context.Context, ch
 	const insertMsg = `
 		INSERT INTO messages (chat_id, user_id, content)
 		VALUES ($1::uuid, $2::uuid, $3)
-		RETURNING id::text, chat_id::text, user_id::text, content, is_e2e, created_at, edited_at
+		RETURNING id::text, chat_id::text, COALESCE(user_id::text, ''), sender_bot_id::text, content, is_e2e, created_at, edited_at
 	`
 	var msg chat.Message
 	if err := tx.QueryRow(ctx, insertMsg, strings.TrimSpace(chatID), strings.TrimSpace(userID), content).
-		Scan(&msg.ID, &msg.ChatID, &msg.UserID, &msg.Content, &msg.IsE2E, &msg.CreatedAt, &msg.EditedAt); err != nil {
+		Scan(&msg.ID, &msg.ChatID, &msg.UserID, &msg.SenderBotID, &msg.Content, &msg.IsE2E, &msg.CreatedAt, &msg.EditedAt); err != nil {
 		if strings.Contains(err.Error(), "violates foreign key constraint") {
 			return chat.Message{}, chat.ErrChatNotFound
 		}
@@ -305,13 +326,13 @@ func (r *MessageRepository) UpdateMessageContent(ctx context.Context, chatID, me
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	const selectMsg = `
-		SELECT id::text, chat_id::text, user_id::text, content, is_e2e
+		SELECT id::text, chat_id::text, COALESCE(user_id::text, ''), sender_bot_id::text, content, is_e2e
 		FROM messages
 		WHERE id = $1::uuid AND chat_id = $2::uuid AND deleted_at IS NULL
 		LIMIT 1
 	`
 	var existing chat.Message
-	if err := tx.QueryRow(ctx, selectMsg, messageID, chatID).Scan(&existing.ID, &existing.ChatID, &existing.UserID, &existing.Content, &existing.IsE2E); err != nil {
+	if err := tx.QueryRow(ctx, selectMsg, messageID, chatID).Scan(&existing.ID, &existing.ChatID, &existing.UserID, &existing.SenderBotID, &existing.Content, &existing.IsE2E); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chat.Message{}, chat.ErrMessageNotFound
 		}
@@ -338,10 +359,10 @@ func (r *MessageRepository) UpdateMessageContent(ctx context.Context, chatID, me
 		    edited_at = NOW(),
 		    updated_at = NOW()
 		WHERE id = $1::uuid AND chat_id = $2::uuid AND deleted_at IS NULL
-		RETURNING id::text, chat_id::text, user_id::text, content, is_e2e, created_at, edited_at
+		RETURNING id::text, chat_id::text, COALESCE(user_id::text, ''), sender_bot_id::text, content, is_e2e, created_at, edited_at
 	`
 	var out chat.Message
-	if err := tx.QueryRow(ctx, updateMsg, messageID, chatID, newContent).Scan(&out.ID, &out.ChatID, &out.UserID, &out.Content, &out.IsE2E, &out.CreatedAt, &out.EditedAt); err != nil {
+	if err := tx.QueryRow(ctx, updateMsg, messageID, chatID, newContent).Scan(&out.ID, &out.ChatID, &out.UserID, &out.SenderBotID, &out.Content, &out.IsE2E, &out.CreatedAt, &out.EditedAt); err != nil {
 		return chat.Message{}, err
 	}
 
@@ -389,13 +410,13 @@ func (r *MessageRepository) CreateMessageE2E(ctx context.Context, chatID, userID
 	const insertMessage = `
 		INSERT INTO messages (chat_id, user_id, content, is_e2e, e2e_sender_device_id)
 		VALUES ($1::uuid, $2::uuid, NULL, TRUE, $3::uuid)
-		RETURNING id::text, chat_id::text, user_id::text, content, is_e2e, e2e_sender_device_id::text, created_at
+		RETURNING id::text, chat_id::text, COALESCE(user_id::text, ''), sender_bot_id::text, content, is_e2e, e2e_sender_device_id::text, created_at
 	`
 
 	var msg chat.Message
 	var senderID string
 	if err := tx.QueryRow(ctx, insertMessage, chatID, userID, senderDeviceID).
-		Scan(&msg.ID, &msg.ChatID, &msg.UserID, &msg.Content, &msg.IsE2E, &senderID, &msg.CreatedAt); err != nil {
+		Scan(&msg.ID, &msg.ChatID, &msg.UserID, &msg.SenderBotID, &msg.Content, &msg.IsE2E, &senderID, &msg.CreatedAt); err != nil {
 		if strings.Contains(err.Error(), "violates foreign key constraint") {
 			return chat.Message{}, chat.ErrChatNotFound
 		}
@@ -450,13 +471,13 @@ func (r *MessageRepository) CreateMessageE2EWithAttachments(ctx context.Context,
 	const insertMessage = `
 		INSERT INTO messages (chat_id, user_id, content, is_e2e, e2e_sender_device_id)
 		VALUES ($1::uuid, $2::uuid, NULL, TRUE, $3::uuid)
-		RETURNING id::text, chat_id::text, user_id::text, content, is_e2e, e2e_sender_device_id::text, created_at
+		RETURNING id::text, chat_id::text, COALESCE(user_id::text, ''), sender_bot_id::text, content, is_e2e, e2e_sender_device_id::text, created_at
 	`
 
 	var msg chat.Message
 	var senderID string
 	if err := tx.QueryRow(ctx, insertMessage, chatID, userID, senderDeviceID).
-		Scan(&msg.ID, &msg.ChatID, &msg.UserID, &msg.Content, &msg.IsE2E, &senderID, &msg.CreatedAt); err != nil {
+		Scan(&msg.ID, &msg.ChatID, &msg.UserID, &msg.SenderBotID, &msg.Content, &msg.IsE2E, &senderID, &msg.CreatedAt); err != nil {
 		if strings.Contains(err.Error(), "violates foreign key constraint") {
 			return chat.Message{}, chat.ErrChatNotFound
 		}
@@ -498,7 +519,7 @@ func (r *MessageRepository) CreateMessageE2EWithAttachments(ctx context.Context,
 
 func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, limit int, cursor string) (chat.MessagePage, error) {
 	const baseQuery = `
-		SELECT id::text, chat_id::text, user_id::text, content, is_e2e, e2e_sender_device_id::text, created_at, edited_at
+		SELECT id::text, chat_id::text, COALESCE(user_id::text, ''), sender_bot_id::text, content, is_e2e, e2e_sender_device_id::text, created_at, edited_at
 		FROM messages
 		WHERE chat_id = $1::uuid
 		  AND deleted_at IS NULL
@@ -529,12 +550,15 @@ func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, lim
 	out := make([]chat.Message, 0, limit)
 	for rows.Next() {
 		var item chat.Message
-		var senderDeviceID string
-		if err := rows.Scan(&item.ID, &item.ChatID, &item.UserID, &item.Content, &item.IsE2E, &senderDeviceID, &item.CreatedAt, &item.EditedAt); err != nil {
+		var senderDeviceID *string
+		if err := rows.Scan(&item.ID, &item.ChatID, &item.UserID, &item.SenderBotID, &item.Content, &item.IsE2E, &senderDeviceID, &item.CreatedAt, &item.EditedAt); err != nil {
 			return chat.MessagePage{}, err
 		}
+		if strings.TrimSpace(item.UserID) == "" && item.SenderBotID != nil {
+			item.UserID = "bot:" + strings.TrimSpace(*item.SenderBotID)
+		}
 		if item.IsE2E {
-			item.E2E = &chat.E2EPayload{SenderDeviceID: senderDeviceID}
+			item.E2E = &chat.E2EPayload{SenderDeviceID: strings.TrimSpace(derefString(senderDeviceID))}
 		}
 		out = append(out, item)
 	}
@@ -552,7 +576,7 @@ func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, lim
 
 func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, deviceID string, limit int, cursor string) (chat.MessagePage, error) {
 	const baseQuery = `
-		SELECT m.id::text, m.chat_id::text, m.user_id::text, m.content,
+		SELECT m.id::text, m.chat_id::text, COALESCE(m.user_id::text, ''), m.sender_bot_id::text, m.content,
 		       m.is_e2e, m.e2e_sender_device_id::text,
 		       e.recipient_device_id::text, e.alg, e.header, e.ciphertext,
 		       m.created_at, m.edited_at
@@ -589,7 +613,8 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 	out := make([]chat.Message, 0, limit)
 	for rows.Next() {
 		var item chat.Message
-		var senderDeviceID string
+		var senderDeviceID *string
+		var senderBotID *string
 		var recDeviceID *string
 		var alg, header, ciphertext *string
 		var editedAt *time.Time
@@ -597,6 +622,7 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 			&item.ID,
 			&item.ChatID,
 			&item.UserID,
+			&senderBotID,
 			&item.Content,
 			&item.IsE2E,
 			&senderDeviceID,
@@ -610,9 +636,13 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 			return chat.MessagePage{}, err
 		}
 		item.EditedAt = editedAt
+		item.SenderBotID = senderBotID
+		if strings.TrimSpace(item.UserID) == "" && senderBotID != nil {
+			item.UserID = "bot:" + strings.TrimSpace(*senderBotID)
+		}
 
 		if item.IsE2E {
-			payload := &chat.E2EPayload{SenderDeviceID: senderDeviceID}
+			payload := &chat.E2EPayload{SenderDeviceID: strings.TrimSpace(derefString(senderDeviceID))}
 			if recDeviceID != nil && alg != nil && header != nil && ciphertext != nil {
 				payload.Envelope = &chat.E2EEnvelope{
 					RecipientDeviceID: *recDeviceID,
@@ -635,6 +665,13 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 		page.NextCursor = formatMessageCursor(last.CreatedAt, last.ID)
 	}
 	return page, nil
+}
+
+func derefString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 func formatMessageCursor(createdAt time.Time, id string) string {

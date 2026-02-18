@@ -60,5 +60,17 @@
   "error.e2e.invalid_device_id": "device id invalid",
   "error.e2e.invalid_signed_prekey": "signed prekey invalid",
   "error.e2e.device_not_found": "dispozitiv negasit",
-  "error.e2e.key_backup.not_found": "backup cheie negasit"
+  "error.e2e.key_backup.not_found": "backup cheie negasit",
+  "auth.email_code.sent": "verification code sent",
+  "auth.email_code.verified": "email verified",
+  "error.auth.invalid_email_code": "invalid or expired email code",
+  "error.auth.email_code_unavailable": "email verification service is unavailable",
+  "error.media.unsupported_mime": "unsupported media mime type",
+  "error.media.mkv_as_file_only": "mkv must be uploaded as file kind",
+  "mail.auth.email_code.subject": "Combox: verification code",
+  "mail.auth.email_code.text": "Your verification code: %s`nEmail: %s`nValid until %s UTC.`n`nIf this wasn't you, ignore this email.",
+  "mail.auth.email_code.html": "<div style=\"background:#0b1220;border:1px solid #24344f;border-radius:16px;padding:20px;color:#e8edff;font-family:Arial,sans-serif\"><p style=\"margin:0 0 10px 0;font-size:14px;opacity:.85\">Combox</p><p style=\"margin:0 0 8px 0;font-size:14px;opacity:.85\">Verification code</p><p style=\"margin:0 0 14px 0;font-size:34px;letter-spacing:6px;font-weight:700\">%s</p><p style=\"margin:0 0 8px 0;font-size:14px\">Email: <b>%s</b></p><p style=\"margin:0 0 8px 0;font-size:14px\">Valid until %s UTC.</p><p style=\"margin:12px 0 0 0;font-size:12px;opacity:.8\">If this wasn't you, ignore this email.</p></div>",
+  "error.auth.email_code_required": "verify email code before entering password",
+  "error.auth.login_key_required": "login verification key is required",
+  "error.auth.login_key_invalid": "login verification key is invalid or expired"
 }

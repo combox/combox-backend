@@ -28,10 +28,11 @@ type Error struct {
 }
 
 type MessageMeta struct {
-	ID     string
-	ChatID string
-	UserID string
-	IsE2E  bool
+	ID          string
+	ChatID      string
+	UserID      string
+	SenderBotID *string
+	IsE2E       bool
 }
 
 func (s *Service) EditMessage(ctx context.Context, input EditMessageInput) (Message, error) {
@@ -277,14 +278,15 @@ type Chat struct {
 }
 
 type Message struct {
-	ID        string      `json:"id"`
-	ChatID    string      `json:"chat_id"`
-	UserID    string      `json:"user_id"`
-	Content   string      `json:"content"`
-	IsE2E     bool        `json:"is_e2e"`
-	E2E       *E2EPayload `json:"e2e,omitempty"`
-	CreatedAt time.Time   `json:"created_at"`
-	EditedAt  *time.Time  `json:"edited_at,omitempty"`
+	ID          string      `json:"id"`
+	ChatID      string      `json:"chat_id"`
+	UserID      string      `json:"user_id"`
+	SenderBotID *string     `json:"sender_bot_id,omitempty"`
+	Content     string      `json:"content"`
+	IsE2E       bool        `json:"is_e2e"`
+	E2E         *E2EPayload `json:"e2e,omitempty"`
+	CreatedAt   time.Time   `json:"created_at"`
+	EditedAt    *time.Time  `json:"edited_at,omitempty"`
 }
 
 type E2EEnvelope struct {
@@ -313,6 +315,7 @@ type CreateChatInput struct {
 
 type CreateMessageInput struct {
 	UserID         string
+	BotID          string
 	ChatID         string
 	Content        string
 	AttachmentIDs  []string
@@ -338,6 +341,7 @@ type ChatRepository interface {
 
 type MessageRepository interface {
 	CreateMessage(ctx context.Context, chatID, userID, content string) (Message, error)
+	CreateMessageAsBot(ctx context.Context, chatID, botID, content string) (Message, error)
 	CreateMessageWithAttachments(ctx context.Context, chatID, userID, content string, attachmentIDs []string) (Message, error)
 	CreateMessageE2E(ctx context.Context, chatID, userID, senderDeviceID string, envelopes []E2EEnvelope) (Message, error)
 	CreateMessageE2EWithAttachments(ctx context.Context, chatID, userID, senderDeviceID string, envelopes []E2EEnvelope, attachmentIDs []string) (Message, error)
@@ -519,6 +523,7 @@ func (s *Service) ListChats(ctx context.Context, userID string) ([]Chat, error) 
 
 func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (Message, error) {
 	userID := strings.TrimSpace(input.UserID)
+	botID := strings.TrimSpace(input.BotID)
 	chatID := strings.TrimSpace(input.ChatID)
 	content := strings.TrimSpace(input.Content)
 	senderDeviceID := strings.TrimSpace(input.SenderDeviceID)
@@ -531,11 +536,14 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 		attachmentIDs = append(attachmentIDs, id)
 	}
 
-	if userID == "" || chatID == "" {
+	if chatID == "" || (userID == "" && botID == "") {
 		return Message{}, &Error{
 			Code:       CodeInvalidArgument,
 			MessageKey: "error.message.invalid_input",
 		}
+	}
+	if userID != "" && botID != "" {
+		return Message{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input"}
 	}
 
 	isE2E := len(input.Envelopes) > 0 || senderDeviceID != ""
@@ -555,18 +563,20 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 		}
 	}
 
-	member, err := s.chats.IsChatMember(ctx, chatID, userID)
-	if err != nil {
-		return Message{}, &Error{
-			Code:       CodeInternal,
-			MessageKey: "error.internal",
-			Cause:      err,
+	if userID != "" {
+		member, err := s.chats.IsChatMember(ctx, chatID, userID)
+		if err != nil {
+			return Message{}, &Error{
+				Code:       CodeInternal,
+				MessageKey: "error.internal",
+				Cause:      err,
+			}
 		}
-	}
-	if !member {
-		return Message{}, &Error{
-			Code:       CodeForbidden,
-			MessageKey: "error.chat.forbidden",
+		if !member {
+			return Message{}, &Error{
+				Code:       CodeForbidden,
+				MessageKey: "error.chat.forbidden",
+			}
 		}
 	}
 
@@ -600,13 +610,21 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 	var message Message
 	var repoErr error
 	if isE2E {
+		if userID == "" {
+			return Message{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_e2e_payload"}
+		}
 		if len(attachmentIDs) > 0 {
 			message, repoErr = s.messages.CreateMessageE2EWithAttachments(ctx, chatID, userID, senderDeviceID, input.Envelopes, attachmentIDs)
 		} else {
 			message, repoErr = s.messages.CreateMessageE2E(ctx, chatID, userID, senderDeviceID, input.Envelopes)
 		}
 	} else {
-		if len(attachmentIDs) > 0 {
+		if botID != "" {
+			if len(attachmentIDs) > 0 {
+				return Message{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input"}
+			}
+			message, repoErr = s.messages.CreateMessageAsBot(ctx, chatID, botID, content)
+		} else if len(attachmentIDs) > 0 {
 			message, repoErr = s.messages.CreateMessageWithAttachments(ctx, chatID, userID, content, attachmentIDs)
 		} else {
 			message, repoErr = s.messages.CreateMessage(ctx, chatID, userID, content)
@@ -645,11 +663,15 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 	if !isE2E && s.publisher != nil {
 		members, err := s.chats.ListChatMemberIDs(ctx, chatID)
 		if err == nil {
+			senderID := userID
+			if strings.TrimSpace(senderID) == "" && message.SenderBotID != nil {
+				senderID = "bot:" + strings.TrimSpace(*message.SenderBotID)
+			}
 			for _, memberID := range members {
 				ev := UserMessageCreatedEvent{
 					MessageID:       message.ID,
 					ChatID:          message.ChatID,
-					SenderUserID:    userID,
+					SenderUserID:    senderID,
 					RecipientUserID: memberID,
 					CreatedAt:       message.CreatedAt,
 				}

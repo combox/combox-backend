@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,6 +16,8 @@ import (
 
 	"combox-backend/internal/config"
 	"combox-backend/internal/i18n"
+	resendintegration "combox-backend/internal/integration/resend"
+	systembotintegration "combox-backend/internal/integration/systembot"
 	"combox-backend/internal/observability"
 	miniorepo "combox-backend/internal/repository/minio"
 	pgrepo "combox-backend/internal/repository/postgres"
@@ -24,6 +27,7 @@ import (
 	botwebhooksvc "combox-backend/internal/service/botwebhook"
 	chatsvc "combox-backend/internal/service/chat"
 	e2esvc "combox-backend/internal/service/e2e"
+	emailcodesvc "combox-backend/internal/service/emailcode"
 	mediasvc "combox-backend/internal/service/media"
 	httptransport "combox-backend/internal/transport/http"
 )
@@ -101,6 +105,14 @@ func (a mediaStoreAdapter) PresignGetObject(ctx context.Context, objectKey strin
 	return a.c.PresignGetObject(ctx, objectKey, expires)
 }
 
+func (a mediaStoreAdapter) GetObject(ctx context.Context, objectKey string) (io.ReadCloser, error) {
+	return a.c.GetObject(ctx, objectKey)
+}
+
+func (a mediaStoreAdapter) PutObject(ctx context.Context, objectKey, contentType string, body io.Reader, size int64) error {
+	return a.c.PutObject(ctx, objectKey, contentType, body, size)
+}
+
 func Run(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -138,9 +150,15 @@ func Run(ctx context.Context) error {
 		}
 	}
 
+	minioClient, err := miniorepo.New(cfg.MinIO)
+	if err != nil {
+		return fmt.Errorf("init minio: %w", err)
+	}
+
 	authService, err := authsvc.New(authsvc.Config{
 		Users:         pgrepo.NewAuthUserRepository(postgresClient),
 		Sessions:      pgrepo.NewAuthSessionRepository(postgresClient),
+		Avatars:       minioClient,
 		AccessSecret:  cfg.Auth.AccessSecret,
 		RefreshSecret: cfg.Auth.RefreshSecret,
 		AccessTTL:     cfg.Auth.AccessTTL,
@@ -166,10 +184,6 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("init e2e service: %w", err)
 	}
 
-	minioClient, err := miniorepo.New(cfg.MinIO)
-	if err != nil {
-		return fmt.Errorf("init minio: %w", err)
-	}
 	mediaService, err := mediasvc.New(pgrepo.NewMediaRepository(postgresClient), mediaStoreAdapter{c: minioClient})
 	if err != nil {
 		return fmt.Errorf("init media service: %w", err)
@@ -182,6 +196,35 @@ func Run(ctx context.Context) error {
 	}
 	botWebhookService := botwebhooksvc.New()
 
+	var emailCodeService *emailcodesvc.Service
+	if cfg.Auth.EmailVerify.Enabled {
+		resendSender, err := resendintegration.New(resendintegration.Config{
+			APIKey:  cfg.Auth.EmailVerify.ResendAPIKey,
+			From:    cfg.Auth.EmailVerify.ResendFrom,
+			BaseURL: cfg.Auth.EmailVerify.ResendBase,
+		})
+		if err != nil {
+			return fmt.Errorf("init resend sender: %w", err)
+		}
+
+		emailCodeService, err = emailcodesvc.New(emailcodesvc.Config{
+			Sender:      resendSender,
+			Notifier:    systembotintegration.New(postgresClient.Pool(), chatSvc),
+			I18n:        catalog,
+			CodeTTL:     cfg.Auth.EmailVerify.CodeTTL,
+			VerifiedTTL: cfg.Auth.EmailVerify.CodeTTL,
+			MaxAttempts: cfg.Auth.EmailVerify.MaxAttempts,
+		})
+		if err != nil {
+			return fmt.Errorf("init email code service: %w", err)
+		}
+	}
+
+	var emailCodeAPI httptransport.EmailCodeService
+	if emailCodeService != nil {
+		emailCodeAPI = emailCodeService
+	}
+
 	router := httptransport.NewRouter(httptransport.RouterDeps{
 		Logger:        logger,
 		Postgres:      postgresClient,
@@ -191,6 +234,7 @@ func Run(ctx context.Context) error {
 		DefaultLocale: cfg.App.DefaultLocale,
 		AccessSecret:  cfg.Auth.AccessSecret,
 		Auth:          authService,
+		EmailCode:     emailCodeAPI,
 		Chat:          chatSvc,
 		Media:         mediaService,
 		E2E:           e2eService,

@@ -46,11 +46,11 @@ func newPrivateBotTokensHandler(svc BotTokenService, i18n Translator, defaultLoc
 		}
 
 		out, err := svc.GenerateToken(r.Context(), botauthsvc.GenerateTokenInput{
-			BotUserID: userID,
-			Name:      req.Name,
-			Scopes:    req.Scopes,
-			ChatIDs:   req.ChatIDs,
-			ExpiresAt: expiresAt,
+			OwnerUserID: userID,
+			Name:        req.Name,
+			Scopes:      req.Scopes,
+			ChatIDs:     req.ChatIDs,
+			ExpiresAt:   expiresAt,
 		})
 		if err != nil {
 			writeBotTokenServiceError(w, r, err, i18n, defaultLocale)

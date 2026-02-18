@@ -20,10 +20,15 @@ func (m *memUserRepo) Create(_ context.Context, input CreateUserInput) (User, er
 		return User{}, ErrUsernameTaken
 	}
 	user := User{
-		ID:           "user-1",
-		Email:        input.Email,
-		Username:     input.Username,
-		PasswordHash: input.PasswordHash,
+		ID:             "user-1",
+		Email:          input.Email,
+		Username:       input.Username,
+		PasswordHash:   input.PasswordHash,
+		FirstName:      input.FirstName,
+		LastName:       input.LastName,
+		BirthDate:      input.BirthDate,
+		AvatarDataURL:  input.AvatarDataURL,
+		AvatarGradient: input.AvatarGradient,
 	}
 	if m.usersByID == nil {
 		m.usersByID = map[string]User{}
@@ -128,9 +133,10 @@ func TestRegisterLoginRefreshLogoutFlow(t *testing.T) {
 
 	ctx := context.Background()
 	user, registerTokens, err := svc.Register(ctx, RegisterInput{
-		Email:    "user@example.com",
-		Username: "user",
-		Password: "StrongPassword123!",
+		Email:     "user@example.com",
+		Username:  "user",
+		Password:  "StrongPassword123!",
+		FirstName: "User",
 	})
 	if err != nil {
 		t.Fatalf("register: %v", err)
@@ -221,9 +227,10 @@ func TestRefreshExtendsSessionUsingUserIdleTTL(t *testing.T) {
 
 	ctx := context.Background()
 	_, _, err = svc.Register(ctx, RegisterInput{
-		Email:    "user@example.com",
-		Username: "user",
-		Password: "StrongPassword123!",
+		Email:     "user@example.com",
+		Username:  "user",
+		Password:  "StrongPassword123!",
+		FirstName: "User",
 	})
 	if err != nil {
 		t.Fatalf("register: %v", err)

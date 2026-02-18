@@ -41,6 +41,7 @@ func (e *Error) Error() string {
 }
 
 type Principal struct {
+	BotID           string
 	UserID          string
 	Scopes          map[string]struct{}
 	AllowedChatIDs  map[string]struct{}
@@ -61,25 +62,26 @@ func (p Principal) CanAccessChat(chatID string) bool {
 }
 
 type GenerateTokenInput struct {
-	BotUserID string
-	Name      string
-	Scopes    []string
-	ChatIDs   []string
-	ExpiresAt *time.Time
+	OwnerUserID string
+	Name        string
+	Scopes      []string
+	ChatIDs     []string
+	ExpiresAt   *time.Time
 }
 
 type GeneratedToken struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name,omitempty"`
-	BotUserID string     `json:"bot_user_id"`
-	Scopes    []string   `json:"scopes"`
-	ChatIDs   []string   `json:"chat_ids"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	Token     string     `json:"token"`
+	ID          string     `json:"id"`
+	Name        string     `json:"name,omitempty"`
+	BotID       string     `json:"bot_id"`
+	OwnerUserID string     `json:"owner_user_id"`
+	Scopes      []string   `json:"scopes"`
+	ChatIDs     []string   `json:"chat_ids"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	Token       string     `json:"token"`
 }
 
 type CreateTokenRecordInput struct {
-	BotUserID  string
+	BotID      string
 	Name       string
 	SecretHash string
 	Scopes     []string
@@ -88,16 +90,25 @@ type CreateTokenRecordInput struct {
 }
 
 type StoredToken struct {
-	ID         string
-	BotUserID  string
-	SecretHash string
-	Scopes     []string
-	ChatIDs    []string
-	IsRevoked  bool
-	ExpiresAt  *time.Time
+	ID          string
+	BotID       string
+	OwnerUserID string
+	ActorUserID string
+	SecretHash  string
+	Scopes      []string
+	ChatIDs     []string
+	IsRevoked   bool
+	ExpiresAt   *time.Time
+}
+
+type Bot struct {
+	ID          string
+	OwnerUserID string
+	ActorUserID string
 }
 
 type Repository interface {
+	EnsureUserBot(ctx context.Context, ownerUserID, name string) (Bot, error)
 	Create(ctx context.Context, input CreateTokenRecordInput) (StoredToken, error)
 	FindActiveByID(ctx context.Context, id string) (StoredToken, error)
 	TouchLastUsed(ctx context.Context, id string, at time.Time) error
@@ -120,8 +131,8 @@ func New(repo Repository, pepper string) (*Service, error) {
 }
 
 func (s *Service) GenerateToken(ctx context.Context, input GenerateTokenInput) (GeneratedToken, error) {
-	botUserID := strings.TrimSpace(input.BotUserID)
-	if botUserID == "" {
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	if ownerUserID == "" {
 		return GeneratedToken{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.bot.invalid_token_input"}
 	}
 
@@ -133,6 +144,10 @@ func (s *Service) GenerateToken(ctx context.Context, input GenerateTokenInput) (
 	if len(chatIDs) == 0 {
 		return GeneratedToken{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.bot.invalid_token_input"}
 	}
+	bot, err := s.repo.EnsureUserBot(ctx, ownerUserID, strings.TrimSpace(input.Name))
+	if err != nil {
+		return GeneratedToken{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
 
 	secretRaw := make([]byte, 32)
 	if _, err := rand.Read(secretRaw); err != nil {
@@ -142,7 +157,7 @@ func (s *Service) GenerateToken(ctx context.Context, input GenerateTokenInput) (
 	secretHash := s.hashSecret(secret)
 
 	stored, err := s.repo.Create(ctx, CreateTokenRecordInput{
-		BotUserID:  botUserID,
+		BotID:      bot.ID,
 		Name:       strings.TrimSpace(input.Name),
 		SecretHash: secretHash,
 		Scopes:     scopes,
@@ -155,13 +170,14 @@ func (s *Service) GenerateToken(ctx context.Context, input GenerateTokenInput) (
 
 	token := "bt_" + stored.ID + "." + secret
 	return GeneratedToken{
-		ID:        stored.ID,
-		Name:      strings.TrimSpace(input.Name),
-		BotUserID: stored.BotUserID,
-		Scopes:    append([]string(nil), stored.Scopes...),
-		ChatIDs:   append([]string(nil), stored.ChatIDs...),
-		ExpiresAt: stored.ExpiresAt,
-		Token:     token,
+		ID:          stored.ID,
+		Name:        strings.TrimSpace(input.Name),
+		BotID:       stored.BotID,
+		OwnerUserID: stored.OwnerUserID,
+		Scopes:      append([]string(nil), stored.Scopes...),
+		ChatIDs:     append([]string(nil), stored.ChatIDs...),
+		ExpiresAt:   stored.ExpiresAt,
+		Token:       token,
 	}, nil
 }
 
@@ -210,7 +226,8 @@ func (s *Service) ValidateToken(ctx context.Context, token string) (Principal, e
 	}
 
 	return Principal{
-		UserID:          strings.TrimSpace(stored.BotUserID),
+		BotID:           strings.TrimSpace(stored.BotID),
+		UserID:          strings.TrimSpace(stored.ActorUserID),
 		Scopes:          scopes,
 		AllowedChatIDs:  chats,
 		AllowAllChatIDs: allowAll,

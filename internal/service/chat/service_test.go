@@ -94,6 +94,20 @@ func (m *memMsgRepo) CreateMessage(_ context.Context, chatID, userID, content st
 	return msg, nil
 }
 
+func (m *memMsgRepo) CreateMessageAsBot(_ context.Context, chatID, botID, content string) (Message, error) {
+	msg := Message{
+		ID:          "msg-bot-1",
+		ChatID:      chatID,
+		UserID:      "bot:" + botID,
+		SenderBotID: &botID,
+		Content:     content,
+		IsE2E:       false,
+		CreatedAt:   time.Now().UTC(),
+	}
+	m.items = append(m.items, msg)
+	return msg, nil
+}
+
 func (m *memMsgRepo) CreateMessageWithAttachments(ctx context.Context, chatID, userID, content string, _ []string) (Message, error) {
 	return m.CreateMessage(ctx, chatID, userID, content)
 }

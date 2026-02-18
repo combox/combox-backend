@@ -21,14 +21,35 @@ func NewAuthUserRepository(client *Client) *AuthUserRepository {
 
 func (r *AuthUserRepository) Create(ctx context.Context, input authsvc.CreateUserInput) (authsvc.User, error) {
 	const query = `
-		INSERT INTO users (email, username, password_hash)
-		VALUES ($1, $2, $3)
-		RETURNING id::text, email, username, password_hash, session_idle_ttl_seconds
+		INSERT INTO users (email, username, password_hash, first_name, last_name, birth_date, avatar_data_url, avatar_gradient)
+		VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8)
+		RETURNING id::text, email, username, password_hash, COALESCE(first_name, ''), last_name, birth_date::text, avatar_data_url, avatar_gradient, session_idle_ttl_seconds
 	`
 
 	var user authsvc.User
-	err := r.client.pool.QueryRow(ctx, query, input.Email, input.Username, input.PasswordHash).
-		Scan(&user.ID, &user.Email, &user.Username, &user.PasswordHash, &user.SessionIdleTTLSeconds)
+	err := r.client.pool.QueryRow(
+		ctx,
+		query,
+		input.Email,
+		input.Username,
+		input.PasswordHash,
+		input.FirstName,
+		input.LastName,
+		input.BirthDate,
+		input.AvatarDataURL,
+		input.AvatarGradient,
+	).Scan(
+		&user.ID,
+		&user.Email,
+		&user.Username,
+		&user.PasswordHash,
+		&user.FirstName,
+		&user.LastName,
+		&user.BirthDate,
+		&user.AvatarDataURL,
+		&user.AvatarGradient,
+		&user.SessionIdleTTLSeconds,
+	)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -47,7 +68,7 @@ func (r *AuthUserRepository) Create(ctx context.Context, input authsvc.CreateUse
 
 func (r *AuthUserRepository) FindByID(ctx context.Context, userID string) (authsvc.User, error) {
 	const query = `
-		SELECT id::text, email, username, password_hash, session_idle_ttl_seconds
+		SELECT id::text, email, username, password_hash, COALESCE(first_name, ''), last_name, birth_date::text, avatar_data_url, avatar_gradient, session_idle_ttl_seconds
 		FROM users
 		WHERE id = $1::uuid
 		LIMIT 1
@@ -55,7 +76,7 @@ func (r *AuthUserRepository) FindByID(ctx context.Context, userID string) (auths
 
 	var user authsvc.User
 	err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(userID)).
-		Scan(&user.ID, &user.Email, &user.Username, &user.PasswordHash, &user.SessionIdleTTLSeconds)
+		Scan(&user.ID, &user.Email, &user.Username, &user.PasswordHash, &user.FirstName, &user.LastName, &user.BirthDate, &user.AvatarDataURL, &user.AvatarGradient, &user.SessionIdleTTLSeconds)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return authsvc.User{}, authsvc.ErrUserNotFound
@@ -67,7 +88,7 @@ func (r *AuthUserRepository) FindByID(ctx context.Context, userID string) (auths
 
 func (r *AuthUserRepository) FindByLogin(ctx context.Context, login string) (authsvc.User, error) {
 	const query = `
-		SELECT id::text, email, username, password_hash, session_idle_ttl_seconds
+		SELECT id::text, email, username, password_hash, COALESCE(first_name, ''), last_name, birth_date::text, avatar_data_url, avatar_gradient, session_idle_ttl_seconds
 		FROM users
 		WHERE email = $1 OR username = $1
 		LIMIT 1
@@ -75,7 +96,7 @@ func (r *AuthUserRepository) FindByLogin(ctx context.Context, login string) (aut
 
 	var user authsvc.User
 	err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(strings.ToLower(login))).
-		Scan(&user.ID, &user.Email, &user.Username, &user.PasswordHash, &user.SessionIdleTTLSeconds)
+		Scan(&user.ID, &user.Email, &user.Username, &user.PasswordHash, &user.FirstName, &user.LastName, &user.BirthDate, &user.AvatarDataURL, &user.AvatarGradient, &user.SessionIdleTTLSeconds)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return authsvc.User{}, authsvc.ErrUserNotFound

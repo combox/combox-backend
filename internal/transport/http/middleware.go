@@ -1,8 +1,10 @@
 package http
 
 import (
+	"bufio"
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -64,11 +66,14 @@ func BotAuthMiddleware(botAuth BotAuthService, i18n Translator, defaultLocale st
 
 func AuthMiddleware(accessSecret string, i18n Translator, defaultLocale string) func(http.Handler) http.Handler {
 	allowed := map[string]struct{}{
-		"/api/private/v1/auth/register": {},
-		"/api/private/v1/auth/login":    {},
-		"/api/private/v1/auth/refresh":  {},
-		"/api/private/v1/auth/logout":   {},
-		"/api/private/v1/ws":            {},
+		"/api/private/v1/auth/email-exists":      {},
+		"/api/private/v1/auth/email-code/send":   {},
+		"/api/private/v1/auth/email-code/verify": {},
+		"/api/private/v1/auth/register":          {},
+		"/api/private/v1/auth/login":             {},
+		"/api/private/v1/auth/refresh":           {},
+		"/api/private/v1/auth/logout":            {},
+		"/api/private/v1/ws":                     {},
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -183,4 +188,18 @@ func (w *responseWriter) Write(body []byte) (int, error) {
 	written, err := w.ResponseWriter.Write(body)
 	w.bytes += written
 	return written, err
+}
+
+func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return hj.Hijack()
+}
+
+func (w *responseWriter) Flush() {
+	if fl, ok := w.ResponseWriter.(http.Flusher); ok {
+		fl.Flush()
+	}
 }

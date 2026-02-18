@@ -8,7 +8,9 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/combox-backend ./cmd/api
 
-FROM gcr.io/distroless/static-debian12
+FROM alpine:3.20 AS runtime
+
+RUN apk add --no-cache ffmpeg ca-certificates
 
 WORKDIR /app
 
