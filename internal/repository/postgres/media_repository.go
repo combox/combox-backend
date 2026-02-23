@@ -137,6 +137,26 @@ func (r *MediaRepository) GetAttachment(ctx context.Context, id string) (media.A
 	return out, nil
 }
 
+func (r *MediaRepository) CanUserAccessAttachment(ctx context.Context, userID, attachmentID string) (bool, error) {
+	const q = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM attachments a
+			INNER JOIN messages m
+				ON m.content LIKE ('%[[att:' || a.id::text || '|%')
+			INNER JOIN chat_members cm
+				ON cm.chat_id = m.chat_id
+			WHERE a.id = $1::uuid
+			  AND cm.user_id = $2::uuid
+		)
+	`
+	var allowed bool
+	if err := r.client.pool.QueryRow(ctx, q, strings.TrimSpace(attachmentID), strings.TrimSpace(userID)).Scan(&allowed); err != nil {
+		return false, err
+	}
+	return allowed, nil
+}
+
 func (r *MediaRepository) SetAttachmentUploadID(ctx context.Context, id string, uploadID string) error {
 	const q = `
 		UPDATE attachments

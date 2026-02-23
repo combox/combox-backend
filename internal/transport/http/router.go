@@ -14,6 +14,7 @@ import (
 	"combox-backend/internal/service/chat"
 	e2esvc "combox-backend/internal/service/e2e"
 	emailcodesvc "combox-backend/internal/service/emailcode"
+	searchsvc "combox-backend/internal/service/search"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -42,6 +43,7 @@ type RouterDeps struct {
 	Auth          AuthService
 	EmailCode     EmailCodeService
 	Chat          ChatService
+	Search        SearchService
 	Media         MediaService
 	E2E           E2EService
 	BotAuth       BotAuthService
@@ -76,6 +78,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 		mux.HandleFunc("/api/private/v1/chats", newChatsHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/chats/", newChatMessagesHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/messages/", newMessagesByIDHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+	}
+	if deps.Search != nil {
+		mux.HandleFunc("/api/private/v1/search", newSearchHandler(deps.Search, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.Media != nil {
 		mux.HandleFunc("/api/private/v1/media/attachments", newMediaAttachmentsHandler(deps.Media, deps.I18n, deps.DefaultLocale))
@@ -194,6 +199,10 @@ type EmailCodeService interface {
 	ConsumeLoginKey(ctx context.Context, email, key string) (bool, error)
 }
 
+type SearchService interface {
+	Search(ctx context.Context, q string, scope string, limit int) (searchsvc.Results, error)
+}
+
 type ChatService interface {
 	CreateChat(ctx context.Context, input chat.CreateChatInput) (chat.Chat, error)
 	ListChats(ctx context.Context, userID string) ([]chat.Chat, error)
@@ -205,6 +214,7 @@ type ChatService interface {
 	ForwardMessage(ctx context.Context, input chat.ForwardMessageInput) (chat.Message, error)
 	DeleteMessageByID(ctx context.Context, userID, messageID string) error
 	MarkMessageReadByID(ctx context.Context, userID, messageID string) (chat.MessageStatus, error)
+	ToggleMessageReactionByID(ctx context.Context, userID, messageID, emoji string) ([]chat.MessageReaction, string, error)
 }
 
 type E2EService interface {

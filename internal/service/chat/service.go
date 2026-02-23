@@ -35,6 +35,11 @@ type MessageMeta struct {
 	IsE2E       bool
 }
 
+type MessageReaction struct {
+	Emoji   string   `json:"emoji"`
+	UserIDs []string `json:"user_ids"`
+}
+
 func (s *Service) EditMessage(ctx context.Context, input EditMessageInput) (Message, error) {
 	userID := strings.TrimSpace(input.UserID)
 	chatID := strings.TrimSpace(input.ChatID)
@@ -274,19 +279,24 @@ type Chat struct {
 	Title     string    `json:"title"`
 	IsDirect  bool      `json:"is_direct"`
 	Type      string    `json:"type"`
+	Kind      string    `json:"kind"`
+	BotID     *string   `json:"bot_id,omitempty"`
+	AvatarURL *string   `json:"avatar_data_url,omitempty"`
+	AvatarBg  *string   `json:"avatar_gradient,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
 type Message struct {
-	ID          string      `json:"id"`
-	ChatID      string      `json:"chat_id"`
-	UserID      string      `json:"user_id"`
-	SenderBotID *string     `json:"sender_bot_id,omitempty"`
-	Content     string      `json:"content"`
-	IsE2E       bool        `json:"is_e2e"`
-	E2E         *E2EPayload `json:"e2e,omitempty"`
-	CreatedAt   time.Time   `json:"created_at"`
-	EditedAt    *time.Time  `json:"edited_at,omitempty"`
+	ID          string            `json:"id"`
+	ChatID      string            `json:"chat_id"`
+	UserID      string            `json:"user_id"`
+	SenderBotID *string           `json:"sender_bot_id,omitempty"`
+	Content     string            `json:"content"`
+	IsE2E       bool              `json:"is_e2e"`
+	E2E         *E2EPayload       `json:"e2e,omitempty"`
+	Reactions   []MessageReaction `json:"reactions,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	EditedAt    *time.Time        `json:"edited_at,omitempty"`
 }
 
 type E2EEnvelope struct {
@@ -333,6 +343,7 @@ type ListMessagesInput struct {
 
 type ChatRepository interface {
 	CreateChat(ctx context.Context, title string, memberIDs []string, creatorID string, chatType string) (Chat, error)
+	FindDirectChatByMembers(ctx context.Context, userAID, userBID, chatType string) (Chat, bool, error)
 	ListChatsByUser(ctx context.Context, userID string) ([]Chat, error)
 	GetChat(ctx context.Context, chatID string) (Chat, error)
 	ListChatMemberIDs(ctx context.Context, chatID string) ([]string, error)
@@ -352,6 +363,7 @@ type MessageRepository interface {
 	UpdateMessageContent(ctx context.Context, chatID, messageID, editorUserID, newContent string) (Message, error)
 	GetMessageMeta(ctx context.Context, messageID string) (MessageMeta, error)
 	SoftDeleteMessage(ctx context.Context, chatID, messageID, deleterUserID string) error
+	ToggleMessageReaction(ctx context.Context, chatID, messageID, userID, emoji string) ([]MessageReaction, string, error)
 }
 
 type StatusRepository interface {
@@ -363,6 +375,7 @@ type MessageEventPublisher interface {
 	PublishUserMessageCreated(ctx context.Context, ev UserMessageCreatedEvent) error
 	PublishMessageStatus(ctx context.Context, ev MessageStatusEvent) error
 	PublishMessageUpdated(ctx context.Context, ev MessageUpdatedEvent) error
+	PublishMessageReaction(ctx context.Context, ev MessageReactionEvent) error
 }
 
 type UserMessageCreatedEvent struct {
@@ -408,6 +421,17 @@ type MessageUpdatedEvent struct {
 	RecipientUserID string
 	Content         string
 	EditedAt        time.Time
+}
+
+type MessageReactionEvent struct {
+	MessageID       string
+	ChatID          string
+	ActorUserID     string
+	RecipientUserID string
+	Emoji           string
+	Action          string
+	Reactions       []MessageReaction
+	At              time.Time
 }
 
 type EditMessageInput struct {
@@ -490,6 +514,15 @@ func (s *Service) CreateChat(ctx context.Context, input CreateChatInput) (Chat, 
 	if chatType == ChatTypeSecretE2E && len(uniqueMembers) != 2 {
 		return Chat{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.chat.secret_must_be_direct"}
 	}
+	if len(uniqueMembers) == 2 {
+		existing, found, err := s.chats.FindDirectChatByMembers(ctx, uniqueMembers[0], uniqueMembers[1], chatType)
+		if err != nil {
+			return Chat{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+		}
+		if found {
+			return existing, nil
+		}
+	}
 
 	created, err := s.chats.CreateChat(ctx, title, uniqueMembers, userID, chatType)
 	if err != nil {
@@ -500,6 +533,63 @@ func (s *Service) CreateChat(ctx context.Context, input CreateChatInput) (Chat, 
 		}
 	}
 	return created, nil
+}
+
+func (s *Service) ToggleMessageReactionByID(ctx context.Context, userID, messageID, emoji string) ([]MessageReaction, string, error) {
+	userID = strings.TrimSpace(userID)
+	messageID = strings.TrimSpace(messageID)
+	emoji = strings.TrimSpace(emoji)
+	if userID == "" || messageID == "" || emoji == "" {
+		return nil, "", &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input"}
+	}
+
+	meta, err := s.messages.GetMessageMeta(ctx, messageID)
+	if err != nil {
+		if errors.Is(err, ErrMessageNotFound) {
+			return nil, "", &Error{Code: CodeNotFound, MessageKey: "error.message.not_found", Cause: err}
+		}
+		return nil, "", &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+
+	member, err := s.chats.IsChatMember(ctx, meta.ChatID, userID)
+	if err != nil {
+		return nil, "", &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+	if !member {
+		return nil, "", &Error{Code: CodeForbidden, MessageKey: "error.chat.forbidden"}
+	}
+
+	reactions, action, err := s.messages.ToggleMessageReaction(ctx, meta.ChatID, meta.ID, userID, emoji)
+	if err != nil {
+		if errors.Is(err, ErrMessageNotFound) {
+			return nil, "", &Error{Code: CodeNotFound, MessageKey: "error.message.not_found", Cause: err}
+		}
+		if errors.Is(err, ErrChatNotFound) {
+			return nil, "", &Error{Code: CodeNotFound, MessageKey: "error.chat.not_found", Cause: err}
+		}
+		return nil, "", &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+
+	if s.publisher != nil {
+		members, listErr := s.chats.ListChatMemberIDs(ctx, meta.ChatID)
+		if listErr == nil {
+			now := s.nowUTC()
+			for _, memberID := range members {
+				_ = s.publisher.PublishMessageReaction(ctx, MessageReactionEvent{
+					MessageID:       meta.ID,
+					ChatID:          meta.ChatID,
+					ActorUserID:     userID,
+					RecipientUserID: memberID,
+					Emoji:           emoji,
+					Action:          action,
+					Reactions:       reactions,
+					At:              now,
+				})
+			}
+		}
+	}
+
+	return reactions, action, nil
 }
 
 func (s *Service) ListChats(ctx context.Context, userID string) ([]Chat, error) {

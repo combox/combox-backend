@@ -18,11 +18,18 @@ func (m *memChatRepo) CreateChat(_ context.Context, title string, memberIDs []st
 	if strings.TrimSpace(chatType) == "" {
 		chatType = ChatTypeStandard
 	}
+	kind := "group"
+	isDirect := len(memberIDs) == 2
+	if isDirect {
+		kind = "direct"
+	}
 	created := Chat{
 		ID:        "chat-1",
 		Title:     title,
-		IsDirect:  len(memberIDs) == 2,
+		IsDirect:  isDirect,
 		Type:      chatType,
+		Kind:      kind,
+		BotID:     nil,
 		CreatedAt: time.Now().UTC(),
 	}
 	m.chats = append(m.chats, created)
@@ -34,6 +41,19 @@ func (m *memChatRepo) CreateChat(_ context.Context, title string, memberIDs []st
 		m.members[created.ID][memberID] = true
 	}
 	return created, nil
+}
+
+func (m *memChatRepo) FindDirectChatByMembers(_ context.Context, userAID, userBID, chatType string) (Chat, bool, error) {
+	for _, c := range m.chats {
+		if !c.IsDirect || c.Type != chatType {
+			continue
+		}
+		members := m.members[c.ID]
+		if members[userAID] && members[userBID] && len(members) == 2 {
+			return c, true, nil
+		}
+	}
+	return Chat{}, false, nil
 }
 
 func (m *memChatRepo) ListChatsByUser(_ context.Context, userID string) ([]Chat, error) {
@@ -184,6 +204,10 @@ func (m *memMsgRepo) GetMessageMeta(_ context.Context, messageID string) (Messag
 
 func (m *memMsgRepo) SoftDeleteMessage(_ context.Context, _ string, _ string, _ string) error {
 	return nil
+}
+
+func (m *memMsgRepo) ToggleMessageReaction(_ context.Context, _, _, _, emoji string) ([]MessageReaction, string, error) {
+	return []MessageReaction{{Emoji: emoji, UserIDs: []string{"u1"}}}, "set", nil
 }
 
 func TestCreateChatAndMessageFlow(t *testing.T) {

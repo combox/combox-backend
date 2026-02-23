@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -74,15 +75,19 @@ func (r *ChatRepository) CreateChat(ctx context.Context, title string, memberIDs
 	}()
 
 	const insertChat = `
-		INSERT INTO chats (title, is_direct, created_by, chat_type)
-		VALUES ($1, $2, $3::uuid, $4)
-		RETURNING id::text, title, is_direct, chat_type, created_at
+		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind)
+		VALUES ($1, $2, $3::uuid, $4, $5)
+		RETURNING id::text, title, is_direct, chat_type, chat_kind, bot_id::text, created_at
 	`
 
 	var created chat.Chat
 	isDirect := len(memberIDs) == 2
-	err = tx.QueryRow(ctx, insertChat, title, isDirect, creatorID, chatType).
-		Scan(&created.ID, &created.Title, &created.IsDirect, &created.Type, &created.CreatedAt)
+	chatKind := "group"
+	if isDirect {
+		chatKind = "direct"
+	}
+	err = tx.QueryRow(ctx, insertChat, title, isDirect, creatorID, chatType, chatKind).
+		Scan(&created.ID, &created.Title, &created.IsDirect, &created.Type, &created.Kind, &created.BotID, &created.CreatedAt)
 	if err != nil {
 		return chat.Chat{}, fmt.Errorf("insert chat: %w", err)
 	}
@@ -104,11 +109,59 @@ func (r *ChatRepository) CreateChat(ctx context.Context, title string, memberIDs
 	return created, nil
 }
 
+func (r *ChatRepository) FindDirectChatByMembers(ctx context.Context, userAID, userBID, chatType string) (chat.Chat, bool, error) {
+	const query = `
+		SELECT c.id::text, c.title, c.is_direct, c.chat_type, c.chat_kind, c.bot_id::text, c.created_at
+		FROM chats c
+		JOIN chat_members cm_a ON cm_a.chat_id = c.id AND cm_a.user_id = $1::uuid
+		JOIN chat_members cm_b ON cm_b.chat_id = c.id AND cm_b.user_id = $2::uuid
+		WHERE c.is_direct = TRUE
+		  AND c.chat_type = $3
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM chat_members cm_extra
+		    WHERE cm_extra.chat_id = c.id
+		      AND cm_extra.user_id NOT IN ($1::uuid, $2::uuid)
+		  )
+		ORDER BY c.created_at ASC
+		LIMIT 1
+	`
+	var found chat.Chat
+	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(userAID), strings.TrimSpace(userBID), strings.TrimSpace(chatType)).
+		Scan(&found.ID, &found.Title, &found.IsDirect, &found.Type, &found.Kind, &found.BotID, &found.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return chat.Chat{}, false, nil
+		}
+		return chat.Chat{}, false, err
+	}
+	return found, true, nil
+}
+
 func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]chat.Chat, error) {
 	const query = `
-		SELECT c.id::text, c.title, c.is_direct, c.chat_type, c.created_at
+		SELECT c.id::text,
+		       CASE
+		         WHEN c.is_direct THEN COALESCE(NULLIF(TRIM(CONCAT_WS(' ', peer.first_name, peer.last_name)), ''), peer.username, c.title)
+		         ELSE c.title
+		       END AS display_title,
+		       c.is_direct,
+		       c.chat_type,
+		       c.chat_kind,
+		       c.bot_id::text,
+		       peer.avatar_data_url,
+		       peer.avatar_gradient,
+		       c.created_at
 		FROM chats c
 		INNER JOIN chat_members cm ON cm.chat_id = c.id
+		LEFT JOIN LATERAL (
+			SELECT u.username, u.first_name, u.last_name, u.avatar_data_url, u.avatar_gradient
+			FROM chat_members cm_peer
+			INNER JOIN users u ON u.id = cm_peer.user_id
+			WHERE cm_peer.chat_id = c.id
+			  AND cm_peer.user_id <> $1::uuid
+			ORDER BY cm_peer.joined_at ASC
+			LIMIT 1
+		) peer ON c.is_direct = TRUE
 		WHERE cm.user_id = $1::uuid
 		ORDER BY c.created_at DESC
 	`
@@ -121,7 +174,7 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 	var out []chat.Chat
 	for rows.Next() {
 		var item chat.Chat
-		if err := rows.Scan(&item.ID, &item.Title, &item.IsDirect, &item.Type, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.IsDirect, &item.Type, &item.Kind, &item.BotID, &item.AvatarURL, &item.AvatarBg, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -134,13 +187,13 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 
 func (r *ChatRepository) GetChat(ctx context.Context, chatID string) (chat.Chat, error) {
 	const query = `
-		SELECT id::text, title, is_direct, chat_type, created_at
+		SELECT id::text, title, is_direct, chat_type, chat_kind, bot_id::text, created_at
 		FROM chats
 		WHERE id = $1::uuid
 		LIMIT 1
 	`
 	var item chat.Chat
-	if err := r.client.pool.QueryRow(ctx, query, chatID).Scan(&item.ID, &item.Title, &item.IsDirect, &item.Type, &item.CreatedAt); err != nil {
+	if err := r.client.pool.QueryRow(ctx, query, chatID).Scan(&item.ID, &item.Title, &item.IsDirect, &item.Type, &item.Kind, &item.BotID, &item.CreatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chat.Chat{}, chat.ErrChatNotFound
 		}
@@ -519,7 +572,25 @@ func (r *MessageRepository) CreateMessageE2EWithAttachments(ctx context.Context,
 
 func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, limit int, cursor string) (chat.MessagePage, error) {
 	const baseQuery = `
-		SELECT id::text, chat_id::text, COALESCE(user_id::text, ''), sender_bot_id::text, content, is_e2e, e2e_sender_device_id::text, created_at, edited_at
+		SELECT id::text,
+		       chat_id::text,
+		       COALESCE(user_id::text, ''),
+		       sender_bot_id::text,
+		       content,
+		       is_e2e,
+		       e2e_sender_device_id::text,
+		       created_at,
+		       edited_at,
+		       COALESCE((
+		         SELECT json_agg(row_to_json(x))
+		         FROM (
+		           SELECT mr.emoji, array_agg(mr.user_id::text ORDER BY mr.updated_at DESC) AS user_ids
+		           FROM message_reactions mr
+		           WHERE mr.message_id = messages.id
+		           GROUP BY mr.emoji
+		           ORDER BY max(mr.updated_at) DESC
+		         ) AS x
+		       ), '[]'::json) AS reactions_json
 		FROM messages
 		WHERE chat_id = $1::uuid
 		  AND deleted_at IS NULL
@@ -551,9 +622,11 @@ func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, lim
 	for rows.Next() {
 		var item chat.Message
 		var senderDeviceID *string
-		if err := rows.Scan(&item.ID, &item.ChatID, &item.UserID, &item.SenderBotID, &item.Content, &item.IsE2E, &senderDeviceID, &item.CreatedAt, &item.EditedAt); err != nil {
+		var reactionsJSON []byte
+		if err := rows.Scan(&item.ID, &item.ChatID, &item.UserID, &item.SenderBotID, &item.Content, &item.IsE2E, &senderDeviceID, &item.CreatedAt, &item.EditedAt, &reactionsJSON); err != nil {
 			return chat.MessagePage{}, err
 		}
+		item.Reactions = parseMessageReactionsJSON(reactionsJSON)
 		if strings.TrimSpace(item.UserID) == "" && item.SenderBotID != nil {
 			item.UserID = "bot:" + strings.TrimSpace(*item.SenderBotID)
 		}
@@ -579,7 +652,17 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 		SELECT m.id::text, m.chat_id::text, COALESCE(m.user_id::text, ''), m.sender_bot_id::text, m.content,
 		       m.is_e2e, m.e2e_sender_device_id::text,
 		       e.recipient_device_id::text, e.alg, e.header, e.ciphertext,
-		       m.created_at, m.edited_at
+		       m.created_at, m.edited_at,
+		       COALESCE((
+		         SELECT json_agg(row_to_json(x))
+		         FROM (
+		           SELECT mr.emoji, array_agg(mr.user_id::text ORDER BY mr.updated_at DESC) AS user_ids
+		           FROM message_reactions mr
+		           WHERE mr.message_id = m.id
+		           GROUP BY mr.emoji
+		           ORDER BY max(mr.updated_at) DESC
+		         ) AS x
+		       ), '[]'::json) AS reactions_json
 		FROM messages m
 		LEFT JOIN message_envelopes e
 		  ON e.message_id = m.id
@@ -618,6 +701,7 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 		var recDeviceID *string
 		var alg, header, ciphertext *string
 		var editedAt *time.Time
+		var reactionsJSON []byte
 		if err := rows.Scan(
 			&item.ID,
 			&item.ChatID,
@@ -632,9 +716,11 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 			&ciphertext,
 			&item.CreatedAt,
 			&editedAt,
+			&reactionsJSON,
 		); err != nil {
 			return chat.MessagePage{}, err
 		}
+		item.Reactions = parseMessageReactionsJSON(reactionsJSON)
 		item.EditedAt = editedAt
 		item.SenderBotID = senderBotID
 		if strings.TrimSpace(item.UserID) == "" && senderBotID != nil {
@@ -688,4 +774,87 @@ func parseMessageCursor(cursor string) (time.Time, string, error) {
 		return time.Time{}, "", err
 	}
 	return time.Unix(0, nanos).UTC(), parts[1], nil
+}
+
+func parseMessageReactionsJSON(raw []byte) []chat.MessageReaction {
+	if len(raw) == 0 {
+		return nil
+	}
+	var parsed []chat.MessageReaction
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil
+	}
+	return parsed
+}
+
+func (r *MessageRepository) ToggleMessageReaction(ctx context.Context, chatID, messageID, userID, emoji string) ([]chat.MessageReaction, string, error) {
+	const checkMessage = `
+		SELECT 1
+		FROM messages
+		WHERE id = $1::uuid
+		  AND chat_id = $2::uuid
+		  AND deleted_at IS NULL
+		LIMIT 1
+	`
+	var exists int
+	if err := r.client.pool.QueryRow(ctx, checkMessage, strings.TrimSpace(messageID), strings.TrimSpace(chatID)).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, "", chat.ErrMessageNotFound
+		}
+		return nil, "", err
+	}
+
+	const getCurrent = `
+		SELECT emoji
+		FROM message_reactions
+		WHERE message_id = $1::uuid
+		  AND user_id = $2::uuid
+		LIMIT 1
+	`
+	var current string
+	currentErr := r.client.pool.QueryRow(ctx, getCurrent, strings.TrimSpace(messageID), strings.TrimSpace(userID)).Scan(&current)
+	if currentErr != nil && !errors.Is(currentErr, pgx.ErrNoRows) {
+		return nil, "", currentErr
+	}
+
+	action := "set"
+	if currentErr == nil && strings.TrimSpace(current) == strings.TrimSpace(emoji) {
+		const deleteQuery = `
+			DELETE FROM message_reactions
+			WHERE message_id = $1::uuid
+			  AND user_id = $2::uuid
+		`
+		if _, err := r.client.pool.Exec(ctx, deleteQuery, strings.TrimSpace(messageID), strings.TrimSpace(userID)); err != nil {
+			return nil, "", err
+		}
+		action = "removed"
+	} else {
+		const upsert = `
+			INSERT INTO message_reactions (message_id, user_id, emoji)
+			VALUES ($1::uuid, $2::uuid, $3)
+			ON CONFLICT (message_id, user_id)
+			DO UPDATE SET emoji = EXCLUDED.emoji, updated_at = NOW()
+		`
+		if _, err := r.client.pool.Exec(ctx, upsert, strings.TrimSpace(messageID), strings.TrimSpace(userID), strings.TrimSpace(emoji)); err != nil {
+			return nil, "", err
+		}
+	}
+
+	const listQuery = `
+		SELECT COALESCE((
+		  SELECT json_agg(row_to_json(x))
+		  FROM (
+		    SELECT mr.emoji, array_agg(mr.user_id::text ORDER BY mr.updated_at DESC) AS user_ids
+		    FROM message_reactions mr
+		    WHERE mr.message_id = $1::uuid
+		    GROUP BY mr.emoji
+		    ORDER BY max(mr.updated_at) DESC
+		  ) AS x
+		), '[]'::json)
+	`
+	var raw []byte
+	if err := r.client.pool.QueryRow(ctx, listQuery, strings.TrimSpace(messageID)).Scan(&raw); err != nil {
+		return nil, "", err
+	}
+	return parseMessageReactionsJSON(raw), action, nil
 }

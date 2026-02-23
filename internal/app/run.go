@@ -29,13 +29,20 @@ import (
 	e2esvc "combox-backend/internal/service/e2e"
 	emailcodesvc "combox-backend/internal/service/emailcode"
 	mediasvc "combox-backend/internal/service/media"
+	searchsvc "combox-backend/internal/service/search"
 	httptransport "combox-backend/internal/transport/http"
 )
 
-type chatPublisherAdapter struct{ p *vkrepo.EventPublisher }
+type chatPublisherAdapter struct {
+	p      *vkrepo.EventPublisher
+	logger *slog.Logger
+}
 
 func (a chatPublisherAdapter) PublishDeviceMessageCreated(ctx context.Context, ev chatsvc.DeviceMessageCreatedEvent) error {
-	return a.p.PublishDeviceMessageCreated(ctx, vkrepo.DeviceMessageCreatedEvent{
+	if a.p == nil {
+		return errors.New("valkey event publisher is nil")
+	}
+	err := a.p.PublishDeviceMessageCreated(ctx, vkrepo.DeviceMessageCreatedEvent{
 		MessageID:         ev.MessageID,
 		ChatID:            ev.ChatID,
 		SenderUserID:      ev.SenderUserID,
@@ -46,30 +53,66 @@ func (a chatPublisherAdapter) PublishDeviceMessageCreated(ctx context.Context, e
 		Ciphertext:        ev.Ciphertext,
 		CreatedAt:         ev.CreatedAt,
 	})
+	if err != nil && a.logger != nil {
+		a.logger.Error("publish ws event failed",
+			slog.String("event", "message.created.device"),
+			slog.String("chat_id", ev.ChatID),
+			slog.String("message_id", ev.MessageID),
+			slog.String("recipient_device_id", ev.RecipientDeviceID),
+			slog.String("error", err.Error()))
+	}
+	return err
 }
 
 func (a chatPublisherAdapter) PublishUserMessageCreated(ctx context.Context, ev chatsvc.UserMessageCreatedEvent) error {
-	return a.p.PublishUserMessageCreated(ctx, vkrepo.UserMessageCreatedEvent{
+	if a.p == nil {
+		return errors.New("valkey event publisher is nil")
+	}
+	err := a.p.PublishUserMessageCreated(ctx, vkrepo.UserMessageCreatedEvent{
 		MessageID:       ev.MessageID,
 		ChatID:          ev.ChatID,
 		SenderUserID:    ev.SenderUserID,
 		RecipientUserID: ev.RecipientUserID,
 		CreatedAt:       ev.CreatedAt,
 	})
+	if err != nil && a.logger != nil {
+		a.logger.Error("publish ws event failed",
+			slog.String("event", "message.created"),
+			slog.String("chat_id", ev.ChatID),
+			slog.String("message_id", ev.MessageID),
+			slog.String("recipient_user_id", ev.RecipientUserID),
+			slog.String("error", err.Error()))
+	}
+	return err
 }
 
 func (a chatPublisherAdapter) PublishMessageStatus(ctx context.Context, ev chatsvc.MessageStatusEvent) error {
-	return a.p.PublishMessageStatus(ctx, vkrepo.MessageStatusEvent{
+	if a.p == nil {
+		return errors.New("valkey event publisher is nil")
+	}
+	err := a.p.PublishMessageStatus(ctx, vkrepo.MessageStatusEvent{
 		MessageID: ev.MessageID,
 		ChatID:    ev.ChatID,
 		UserID:    ev.UserID,
 		Status:    ev.Status,
 		At:        ev.At,
 	})
+	if err != nil && a.logger != nil {
+		a.logger.Error("publish ws event failed",
+			slog.String("event", "message.status"),
+			slog.String("chat_id", ev.ChatID),
+			slog.String("message_id", ev.MessageID),
+			slog.String("recipient_user_id", ev.UserID),
+			slog.String("error", err.Error()))
+	}
+	return err
 }
 
 func (a chatPublisherAdapter) PublishMessageUpdated(ctx context.Context, ev chatsvc.MessageUpdatedEvent) error {
-	return a.p.PublishMessageUpdated(ctx, vkrepo.MessageUpdatedEvent{
+	if a.p == nil {
+		return errors.New("valkey event publisher is nil")
+	}
+	err := a.p.PublishMessageUpdated(ctx, vkrepo.MessageUpdatedEvent{
 		MessageID:       ev.MessageID,
 		ChatID:          ev.ChatID,
 		EditorUserID:    ev.EditorUserID,
@@ -77,6 +120,47 @@ func (a chatPublisherAdapter) PublishMessageUpdated(ctx context.Context, ev chat
 		Content:         ev.Content,
 		EditedAt:        ev.EditedAt,
 	})
+	if err != nil && a.logger != nil {
+		a.logger.Error("publish ws event failed",
+			slog.String("event", "message.updated"),
+			slog.String("chat_id", ev.ChatID),
+			slog.String("message_id", ev.MessageID),
+			slog.String("recipient_user_id", ev.RecipientUserID),
+			slog.String("error", err.Error()))
+	}
+	return err
+}
+
+func (a chatPublisherAdapter) PublishMessageReaction(ctx context.Context, ev chatsvc.MessageReactionEvent) error {
+	if a.p == nil {
+		return errors.New("valkey event publisher is nil")
+	}
+	reactions := make([]vkrepo.MessageReaction, 0, len(ev.Reactions))
+	for _, reaction := range ev.Reactions {
+		reactions = append(reactions, vkrepo.MessageReaction{
+			Emoji:   reaction.Emoji,
+			UserIDs: reaction.UserIDs,
+		})
+	}
+	err := a.p.PublishMessageReaction(ctx, vkrepo.MessageReactionEvent{
+		MessageID:       ev.MessageID,
+		ChatID:          ev.ChatID,
+		ActorUserID:     ev.ActorUserID,
+		RecipientUserID: ev.RecipientUserID,
+		Emoji:           ev.Emoji,
+		Action:          ev.Action,
+		Reactions:       reactions,
+		At:              ev.At,
+	})
+	if err != nil && a.logger != nil {
+		a.logger.Error("publish ws event failed",
+			slog.String("event", "message.reaction"),
+			slog.String("chat_id", ev.ChatID),
+			slog.String("message_id", ev.MessageID),
+			slog.String("recipient_user_id", ev.RecipientUserID),
+			slog.String("error", err.Error()))
+	}
+	return err
 }
 
 type mediaStoreAdapter struct{ c *miniorepo.Client }
@@ -138,6 +222,13 @@ func Run(ctx context.Context) error {
 		Password: cfg.Valkey.Password,
 		DB:       cfg.Valkey.DB,
 	})
+	{
+		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if err := valkeyClient.Ping(pingCtx); err != nil {
+			return fmt.Errorf("init valkey: %w", err)
+		}
+	}
 	defer func() {
 		if closeErr := valkeyClient.Close(); closeErr != nil {
 			logger.Error("close valkey", slog.String("error", closeErr.Error()))
@@ -173,7 +264,7 @@ func Run(ctx context.Context) error {
 	publisher := vkrepo.NewEventPublisher(valkeyClient)
 	statusRepo := vkrepo.NewMessageStatusRepository(valkeyClient)
 
-	chatPublisher := &chatPublisherAdapter{p: publisher}
+	chatPublisher := &chatPublisherAdapter{p: publisher, logger: logger}
 	chatSvc, err := chatsvc.NewWithPublisherAndStatusRepo(chatRepo, msgRepo, chatPublisher, statusRepo)
 	if err != nil {
 		return fmt.Errorf("init chat service: %w", err)
@@ -188,6 +279,8 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("init media service: %w", err)
 	}
+
+	searchService := searchsvc.New(pgrepo.NewSearchRepository(postgresClient))
 
 	botTokenRepo := pgrepo.NewBotTokenRepository(postgresClient)
 	botAuthService, err := botauthsvc.New(botTokenRepo, cfg.Bot.TokenPepper)
@@ -236,6 +329,7 @@ func Run(ctx context.Context) error {
 		Auth:          authService,
 		EmailCode:     emailCodeAPI,
 		Chat:          chatSvc,
+		Search:        searchService,
 		Media:         mediaService,
 		E2E:           e2eService,
 		BotAuth:       botAuthService,

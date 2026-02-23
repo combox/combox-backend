@@ -15,6 +15,8 @@ const EventTypeMessageStatus = "message.status"
 
 const EventTypeMessageUpdated = "message.updated"
 
+const EventTypeMessageReaction = "message.reaction"
+
 type DeviceMessageCreatedEvent struct {
 	Type              string    `json:"type"`
 	MessageID         string    `json:"message_id"`
@@ -55,6 +57,23 @@ type MessageUpdatedEvent struct {
 	RecipientUserID string    `json:"recipient_user_id"`
 	Content         string    `json:"content"`
 	EditedAt        time.Time `json:"edited_at"`
+}
+
+type MessageReaction struct {
+	Emoji   string   `json:"emoji"`
+	UserIDs []string `json:"user_ids"`
+}
+
+type MessageReactionEvent struct {
+	Type            string            `json:"type"`
+	MessageID       string            `json:"message_id"`
+	ChatID          string            `json:"chat_id"`
+	ActorUserID     string            `json:"actor_user_id"`
+	RecipientUserID string            `json:"recipient_user_id"`
+	Emoji           string            `json:"emoji"`
+	Action          string            `json:"action"`
+	Reactions       []MessageReaction `json:"reactions"`
+	At              time.Time         `json:"at"`
 }
 
 type EventPublisher struct {
@@ -121,6 +140,20 @@ func (p *EventPublisher) PublishMessageUpdated(ctx context.Context, ev MessageUp
 	}
 	if ev.Type == "" {
 		ev.Type = EventTypeMessageUpdated
+	}
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("marshal event: %w", err)
+	}
+	return p.c.Client().Publish(ctx, userChannel(ev.RecipientUserID), payload).Err()
+}
+
+func (p *EventPublisher) PublishMessageReaction(ctx context.Context, ev MessageReactionEvent) error {
+	if p == nil || p.c == nil {
+		return nil
+	}
+	if ev.Type == "" {
+		ev.Type = EventTypeMessageReaction
 	}
 	payload, err := json.Marshal(ev)
 	if err != nil {

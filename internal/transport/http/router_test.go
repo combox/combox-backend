@@ -465,11 +465,11 @@ func testTranslator() mapTranslator {
 type stubChatService struct{}
 
 func (stubChatService) CreateChat(context.Context, chatsvc.CreateChatInput) (chatsvc.Chat, error) {
-	return chatsvc.Chat{ID: "chat-1", Title: "General"}, nil
+	return chatsvc.Chat{ID: "chat-1", Title: "General", Type: "standard", Kind: "group"}, nil
 }
 
 func (stubChatService) ListChats(context.Context, string) ([]chatsvc.Chat, error) {
-	return []chatsvc.Chat{{ID: "chat-1", Title: "General"}}, nil
+	return []chatsvc.Chat{{ID: "chat-1", Title: "General", Type: "standard", Kind: "group"}}, nil
 }
 
 func (stubChatService) CreateMessage(context.Context, chatsvc.CreateMessageInput) (chatsvc.Message, error) {
@@ -502,6 +502,10 @@ func (stubChatService) DeleteMessageByID(context.Context, string, string) error 
 
 func (stubChatService) MarkMessageReadByID(context.Context, string, string) (chatsvc.MessageStatus, error) {
 	return chatsvc.MessageStatus{Status: "read"}, nil
+}
+
+func (stubChatService) ToggleMessageReactionByID(context.Context, string, string, string) ([]chatsvc.MessageReaction, string, error) {
+	return nil, "set", nil
 }
 
 type stubAuthService struct {

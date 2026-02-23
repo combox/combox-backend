@@ -16,6 +16,7 @@ const (
 	CodeNotFound        = "not_found"
 	CodeForbidden       = "forbidden"
 	CodeInternal        = "internal"
+	MaxAttachmentSize   = int64(5 * 1024 * 1024 * 1024) // 5 GiB
 )
 
 type Error struct {
@@ -97,6 +98,7 @@ type CreateAttachmentOutput struct {
 type Repository interface {
 	CreateAttachment(ctx context.Context, a Attachment) (Attachment, error)
 	GetAttachment(ctx context.Context, id string) (Attachment, error)
+	CanUserAccessAttachment(ctx context.Context, userID, attachmentID string) (bool, error)
 	SetAttachmentUploadID(ctx context.Context, id string, uploadID string) error
 	SetProcessing(ctx context.Context, id string, status string, processingError *string, previewObjectKey *string, processedAt *time.Time) error
 }
@@ -170,6 +172,9 @@ func (s *Service) CreateAttachment(ctx context.Context, input CreateAttachmentIn
 	}
 	if userID == "" || filename == "" || mime == "" || kind == "" {
 		return CreateAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+	}
+	if input.SizeBytes != nil && *input.SizeBytes > MaxAttachmentSize {
+		return CreateAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input", Details: map[string]string{"size_bytes": "max_5_gb"}}
 	}
 	if _, isMKV := mkvMIMEs[strings.ToLower(mime)]; isMKV && strings.EqualFold(kind, "video") {
 		return CreateAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.mkv_as_file_only"}
@@ -309,7 +314,13 @@ func (s *Service) GetAttachment(ctx context.Context, requesterUserID, attachment
 		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
 	}
 	if a.UserID != requesterUserID {
-		return GetAttachmentOutput{}, &Error{Code: CodeForbidden, MessageKey: "error.media.forbidden"}
+		allowed, accessErr := s.repo.CanUserAccessAttachment(ctx, requesterUserID, attachmentID)
+		if accessErr != nil {
+			return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: accessErr}
+		}
+		if !allowed {
+			return GetAttachmentOutput{}, &Error{Code: CodeForbidden, MessageKey: "error.media.forbidden"}
+		}
 	}
 
 	urlStr, err := s.store.PresignGetObject(ctx, a.ObjectKey, 15*time.Minute)

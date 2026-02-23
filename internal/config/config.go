@@ -77,11 +77,13 @@ type ValkeyConfig struct {
 
 type MinIOConfig struct {
 	APIInternal  string
+	PublicBase   string
 	Bucket       string
 	RootUser     string
 	RootPassword string
 	Secure       bool
 	Region       string
+	SSEMode      string
 }
 
 type MigrationsConfig struct {
@@ -136,11 +138,13 @@ func Load() (Config, error) {
 		},
 		MinIO: MinIOConfig{
 			APIInternal:  strings.TrimSpace(os.Getenv("MINIO_API_INTERNAL")),
+			PublicBase:   strings.TrimSpace(os.Getenv("MINIO_PUBLIC_BASE_URL")),
 			Bucket:       strings.TrimSpace(os.Getenv("MINIO_BUCKET")),
 			RootUser:     strings.TrimSpace(os.Getenv("MINIO_ROOT_USER")),
 			RootPassword: strings.TrimSpace(os.Getenv("MINIO_ROOT_PASSWORD")),
 			Secure:       getBoolEnv("MINIO_SECURE", false),
 			Region:       getEnv("MINIO_REGION", "us-east-1"),
+			SSEMode:      strings.ToLower(getEnv("MINIO_SSE_MODE", "s3")),
 		},
 		Migrations: MigrationsConfig{
 			Enabled: getBoolEnv("MIGRATIONS_ENABLED", true),
@@ -222,6 +226,15 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.MinIO.RootPassword) == "" {
 		return errors.New("MINIO_ROOT_PASSWORD is required")
+	}
+	if strings.EqualFold(strings.TrimSpace(c.MinIO.RootUser), "minioadmin") &&
+		strings.TrimSpace(c.MinIO.RootPassword) == "minioadmin123" {
+		return errors.New("default MinIO root credentials are forbidden; set MINIO_ROOT_USER and MINIO_ROOT_PASSWORD")
+	}
+	switch strings.TrimSpace(strings.ToLower(c.MinIO.SSEMode)) {
+	case "", "s3":
+	default:
+		return errors.New("MINIO_SSE_MODE must be: s3")
 	}
 
 	if strings.TrimSpace(c.Bot.TokenPepper) == "" {

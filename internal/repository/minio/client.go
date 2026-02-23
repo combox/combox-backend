@@ -12,12 +12,16 @@ import (
 
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/minio-go/v7/pkg/encrypt"
 )
 
 type Client struct {
-	bucket string
-	core   *minio.Core
-	c      *minio.Client
+	bucket       string
+	core         *minio.Core
+	c            *minio.Client
+	publicScheme string
+	publicHost   string
+	sseMode      string
 }
 
 func New(cfg config.MinIOConfig) (*Client, error) {
@@ -39,7 +43,27 @@ func New(cfg config.MinIOConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{bucket: bucket, core: core, c: c}, nil
+
+	publicScheme := ""
+	publicHost := ""
+	if base := strings.TrimSpace(cfg.PublicBase); base != "" {
+		if !strings.Contains(base, "://") {
+			base = "https://" + base
+		}
+		if parsed, parseErr := url.Parse(base); parseErr == nil {
+			publicScheme = strings.TrimSpace(parsed.Scheme)
+			publicHost = strings.TrimSpace(parsed.Host)
+		}
+	}
+
+	return &Client{
+		bucket:       bucket,
+		core:         core,
+		c:            c,
+		publicScheme: publicScheme,
+		publicHost:   publicHost,
+		sseMode:      strings.ToLower(strings.TrimSpace(cfg.SSEMode)),
+	}, nil
 }
 
 func (c *Client) Bucket() string {
@@ -53,7 +77,7 @@ func (c *Client) NewMultipartUpload(ctx context.Context, objectKey, contentType 
 	if c == nil || c.core == nil {
 		return "", nil
 	}
-	opts := minio.PutObjectOptions{ContentType: strings.TrimSpace(contentType)}
+	opts := c.putOptions(contentType)
 	return c.core.NewMultipartUpload(ctx, c.bucket, strings.TrimSpace(objectKey), opts)
 }
 
@@ -68,7 +92,7 @@ func (c *Client) PresignUploadPart(ctx context.Context, objectKey, uploadID stri
 	if err != nil {
 		return "", err
 	}
-	return u.String(), nil
+	return c.publicURL(u).String(), nil
 }
 
 type CompletePart struct {
@@ -88,7 +112,7 @@ func (c *Client) CompleteMultipartUpload(ctx context.Context, objectKey, uploadI
 		}
 		out = append(out, minio.CompletePart{PartNumber: p.PartNumber, ETag: etag})
 	}
-	opts := minio.PutObjectOptions{ContentType: strings.TrimSpace(contentType)}
+	opts := c.putOptions(contentType)
 	_, err := c.core.CompleteMultipartUpload(ctx, c.bucket, strings.TrimSpace(objectKey), strings.TrimSpace(uploadID), out, opts)
 	return err
 }
@@ -101,7 +125,7 @@ func (c *Client) PresignGetObject(ctx context.Context, objectKey string, expires
 	if err != nil {
 		return "", err
 	}
-	return u.String(), nil
+	return c.publicURL(u).String(), nil
 }
 
 func (c *Client) GetObject(ctx context.Context, objectKey string) (io.ReadCloser, error) {
@@ -119,7 +143,31 @@ func (c *Client) PutObject(ctx context.Context, objectKey, contentType string, b
 	if c == nil || c.c == nil {
 		return nil
 	}
-	opts := minio.PutObjectOptions{ContentType: strings.TrimSpace(contentType)}
+	opts := c.putOptions(contentType)
 	_, err := c.c.PutObject(ctx, c.bucket, strings.TrimSpace(objectKey), body, size, opts)
 	return err
+}
+
+func (c *Client) putOptions(contentType string) minio.PutObjectOptions {
+	opts := minio.PutObjectOptions{ContentType: strings.TrimSpace(contentType)}
+	if c == nil {
+		return opts
+	}
+	if c.sseMode == "s3" {
+		opts.ServerSideEncryption = encrypt.NewSSE()
+	}
+	return opts
+}
+
+func (c *Client) publicURL(input *url.URL) *url.URL {
+	if input == nil {
+		return input
+	}
+	if strings.TrimSpace(c.publicScheme) == "" || strings.TrimSpace(c.publicHost) == "" {
+		return input
+	}
+	copyURL := *input
+	copyURL.Scheme = c.publicScheme
+	copyURL.Host = c.publicHost
+	return &copyURL
 }

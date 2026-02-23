@@ -49,6 +49,10 @@ type editMessageRequest struct {
 	Content string `json:"content"`
 }
 
+type toggleReactionRequest struct {
+	Emoji string `json:"emoji"`
+}
+
 func messageReadFromPath(path string) (string, bool) {
 	path = strings.TrimSpace(path)
 	const prefix = "/api/private/v1/messages/"
@@ -83,6 +87,23 @@ func messageIDFromPath(path string) (string, bool) {
 	return parts[0], true
 }
 
+func messageReactionFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/messages/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 2 {
+		return "", false
+	}
+	if parts[0] == "" || parts[1] != "reactions" {
+		return "", false
+	}
+	return parts[0], true
+}
+
 func newMessagesByIDHandler(chat ChatService, i18n Translator, defaultLocale string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
@@ -102,6 +123,25 @@ func newMessagesByIDHandler(chat ChatService, i18n Translator, defaultLocale str
 				writeJSON(w, http.StatusOK, map[string]any{
 					"message": i18n.Translate(locale, "message.read.success"),
 					"status":  status,
+				})
+				return
+			}
+			if messageID, ok := messageReactionFromPath(r.URL.Path); ok {
+				var req toggleReactionRequest
+				if err := decodeJSON(r, &req); err != nil {
+					writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+					return
+				}
+				reactions, action, err := chat.ToggleMessageReactionByID(r.Context(), userID, messageID, req.Emoji)
+				if err != nil {
+					writeChatServiceError(w, r, err, i18n, defaultLocale)
+					return
+				}
+				locale := requestLocale(r, defaultLocale)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"message":   i18n.Translate(locale, "status.ok"),
+					"action":    action,
+					"reactions": reactions,
 				})
 				return
 			}

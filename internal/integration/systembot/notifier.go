@@ -141,10 +141,10 @@ func ensureDirectChat(ctx context.Context, tx pgx.Tx, systemID, userID string) (
 	}
 
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO chats (title, is_direct, created_by, chat_type)
-		VALUES ($1, FALSE, $2::uuid, 'standard')
+		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind, bot_id)
+		VALUES ($1, FALSE, $2::uuid, 'standard', 'bot', $3::uuid)
 		RETURNING id::text
-	`, systemChatTitle, userID).Scan(&chatID); err != nil {
+	`, systemChatTitle, userID, systemID).Scan(&chatID); err != nil {
 		return "", err
 	}
 	if _, err := tx.Exec(ctx, `
