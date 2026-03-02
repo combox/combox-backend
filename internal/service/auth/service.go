@@ -12,7 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/mail"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -27,6 +29,8 @@ const (
 	CodeConflict          = "conflict"
 	CodeInternal          = "internal"
 )
+
+var usernameRe = regexp.MustCompile(`^[a-z0-9_]{4,32}$`)
 
 type Error struct {
 	Code       string
@@ -91,6 +95,8 @@ type UserRepository interface {
 	FindByID(ctx context.Context, userID string) (User, error)
 	FindByLogin(ctx context.Context, login string) (User, error)
 	UpdateSessionIdleTTL(ctx context.Context, userID string, sessionIdleTTLSeconds *int64) error
+	UpdateProfile(ctx context.Context, input UpdateProfileInput) (User, error)
+	UpdateEmail(ctx context.Context, userID, email string) (User, error)
 }
 
 type SessionRepository interface {
@@ -146,6 +152,21 @@ type RefreshInput struct {
 
 type LogoutInput struct {
 	RefreshToken string
+}
+
+type OptionalString struct {
+	Set   bool
+	Value *string
+}
+
+type UpdateProfileInput struct {
+	UserID         string
+	Username       OptionalString
+	FirstName      OptionalString
+	LastName       OptionalString
+	BirthDate      OptionalString
+	AvatarDataURL  OptionalString
+	AvatarGradient OptionalString
 }
 
 type Service struct {
@@ -214,7 +235,7 @@ func New(cfg Config) (*Service, error) {
 
 func (s *Service) Register(ctx context.Context, input RegisterInput) (User, Tokens, error) {
 	email := strings.TrimSpace(strings.ToLower(input.Email))
-	username := strings.TrimSpace(input.Username)
+	username := strings.TrimSpace(strings.ToLower(input.Username))
 	password := strings.TrimSpace(input.Password)
 	firstName := strings.TrimSpace(input.FirstName)
 	var lastName *string
@@ -247,6 +268,12 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (User, Toke
 	}
 
 	if email == "" || username == "" || password == "" || firstName == "" {
+		return User{}, Tokens{}, &Error{
+			Code:       CodeInvalidArgument,
+			MessageKey: "error.auth.invalid_input",
+		}
+	}
+	if !usernameRe.MatchString(username) {
 		return User{}, Tokens{}, &Error{
 			Code:       CodeInvalidArgument,
 			MessageKey: "error.auth.invalid_input",
@@ -497,6 +524,200 @@ func (s *Service) EmailExists(ctx context.Context, email string) (bool, error) {
 		MessageKey: "error.internal",
 		Cause:      err,
 	}
+}
+
+func (s *Service) GetProfile(ctx context.Context, userID string) (User, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return User{}, &Error{
+			Code:       CodeInvalidArgument,
+			MessageKey: "error.auth.invalid_input",
+		}
+	}
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return User{}, &Error{
+				Code:       CodeUnauthorized,
+				MessageKey: "error.auth.invalid_credentials",
+				Cause:      err,
+			}
+		}
+		return User{}, &Error{
+			Code:       CodeInternal,
+			MessageKey: "error.internal",
+			Cause:      err,
+		}
+	}
+	s.resolveAvatarURL(ctx, &user)
+	return user, nil
+}
+
+func (s *Service) UpdateProfile(ctx context.Context, input UpdateProfileInput) (User, error) {
+	userID := strings.TrimSpace(input.UserID)
+	if userID == "" {
+		return User{}, &Error{
+			Code:       CodeInvalidArgument,
+			MessageKey: "error.auth.invalid_input",
+		}
+	}
+	input.UserID = userID
+
+	hasUpdates := input.Username.Set || input.FirstName.Set || input.LastName.Set || input.BirthDate.Set || input.AvatarDataURL.Set || input.AvatarGradient.Set
+	if !hasUpdates {
+		return User{}, &Error{
+			Code:       CodeInvalidArgument,
+			MessageKey: "error.auth.invalid_input",
+		}
+	}
+
+	if input.Username.Set {
+		if input.Username.Value == nil {
+			return User{}, &Error{
+				Code:       CodeInvalidArgument,
+				MessageKey: "error.auth.invalid_input",
+			}
+		}
+		v := strings.TrimSpace(strings.ToLower(*input.Username.Value))
+		if v == "" || !usernameRe.MatchString(v) {
+			return User{}, &Error{
+				Code:       CodeInvalidArgument,
+				MessageKey: "error.auth.invalid_input",
+			}
+		}
+		input.Username.Value = &v
+	}
+
+	if input.FirstName.Set {
+		if input.FirstName.Value == nil {
+			return User{}, &Error{
+				Code:       CodeInvalidArgument,
+				MessageKey: "error.auth.invalid_input",
+			}
+		}
+		v := strings.TrimSpace(*input.FirstName.Value)
+		if v == "" {
+			return User{}, &Error{
+				Code:       CodeInvalidArgument,
+				MessageKey: "error.auth.invalid_input",
+			}
+		}
+		input.FirstName.Value = &v
+	}
+
+	if input.LastName.Set && input.LastName.Value != nil {
+		v := strings.TrimSpace(*input.LastName.Value)
+		if v == "" {
+			input.LastName.Value = nil
+		} else {
+			input.LastName.Value = &v
+		}
+	}
+
+	if input.BirthDate.Set && input.BirthDate.Value != nil {
+		v := strings.TrimSpace(*input.BirthDate.Value)
+		if v == "" {
+			input.BirthDate.Value = nil
+		} else {
+			input.BirthDate.Value = &v
+		}
+	}
+
+	if input.AvatarGradient.Set && input.AvatarGradient.Value != nil {
+		v := strings.TrimSpace(*input.AvatarGradient.Value)
+		if v == "" {
+			input.AvatarGradient.Value = nil
+		} else {
+			input.AvatarGradient.Value = &v
+		}
+	}
+
+	if input.AvatarDataURL.Set && input.AvatarDataURL.Value != nil {
+		v := strings.TrimSpace(*input.AvatarDataURL.Value)
+		if v == "" {
+			input.AvatarDataURL.Value = nil
+		} else if s.avatars != nil {
+			objectKey, err := s.uploadAvatarDataURL(ctx, v)
+			if err != nil {
+				return User{}, &Error{
+					Code:       CodeInternal,
+					MessageKey: "error.internal",
+					Cause:      err,
+				}
+			}
+			ref := avatarRefPrefix + objectKey
+			input.AvatarDataURL.Value = &ref
+		} else {
+			input.AvatarDataURL.Value = &v
+		}
+	}
+
+	user, err := s.users.UpdateProfile(ctx, input)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return User{}, &Error{
+				Code:       CodeUnauthorized,
+				MessageKey: "error.auth.invalid_credentials",
+				Cause:      err,
+			}
+		}
+		if errors.Is(err, ErrUsernameTaken) {
+			return User{}, &Error{
+				Code:       CodeConflict,
+				MessageKey: "error.auth.already_exists",
+				Cause:      err,
+			}
+		}
+		return User{}, &Error{
+			Code:       CodeInternal,
+			MessageKey: "error.internal",
+			Cause:      err,
+		}
+	}
+	s.resolveAvatarURL(ctx, &user)
+	return user, nil
+}
+
+func (s *Service) UpdateEmail(ctx context.Context, userID, email string) (User, error) {
+	userID = strings.TrimSpace(userID)
+	email = strings.TrimSpace(strings.ToLower(email))
+	if userID == "" || email == "" {
+		return User{}, &Error{
+			Code:       CodeInvalidArgument,
+			MessageKey: "error.auth.invalid_input",
+		}
+	}
+	if _, err := mail.ParseAddress(email); err != nil {
+		return User{}, &Error{
+			Code:       CodeInvalidArgument,
+			MessageKey: "error.auth.invalid_input",
+		}
+	}
+
+	user, err := s.users.UpdateEmail(ctx, userID, email)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return User{}, &Error{
+				Code:       CodeUnauthorized,
+				MessageKey: "error.auth.invalid_credentials",
+				Cause:      err,
+			}
+		}
+		if errors.Is(err, ErrEmailTaken) {
+			return User{}, &Error{
+				Code:       CodeConflict,
+				MessageKey: "error.auth.already_exists",
+				Cause:      err,
+			}
+		}
+		return User{}, &Error{
+			Code:       CodeInternal,
+			MessageKey: "error.internal",
+			Cause:      err,
+		}
+	}
+	s.resolveAvatarURL(ctx, &user)
+	return user, nil
 }
 
 func (s *Service) issueSessionTokens(ctx context.Context, userID, userAgent, ipAddress string, idleTTL time.Duration) (Tokens, error) {

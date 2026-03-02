@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	chatsvc "combox-backend/internal/service/chat"
 	e2esvc "combox-backend/internal/service/e2e"
 	emailcodesvc "combox-backend/internal/service/emailcode"
+	gifsvc "combox-backend/internal/service/gif"
 	mediasvc "combox-backend/internal/service/media"
 	searchsvc "combox-backend/internal/service/search"
 	httptransport "combox-backend/internal/transport/http"
@@ -74,6 +76,12 @@ func (a chatPublisherAdapter) PublishUserMessageCreated(ctx context.Context, ev 
 		SenderUserID:    ev.SenderUserID,
 		RecipientUserID: ev.RecipientUserID,
 		CreatedAt:       ev.CreatedAt,
+	})
+	_ = a.p.PublishNotification(ctx, vkrepo.NotificationEvent{
+		UserID:    ev.RecipientUserID,
+		Kind:      "message.created",
+		Payload:   map[string]string{"chat_id": ev.ChatID, "message_id": ev.MessageID, "sender_user_id": ev.SenderUserID},
+		CreatedAt: ev.CreatedAt,
 	})
 	if err != nil && a.logger != nil {
 		a.logger.Error("publish ws event failed",
@@ -123,6 +131,28 @@ func (a chatPublisherAdapter) PublishMessageUpdated(ctx context.Context, ev chat
 	if err != nil && a.logger != nil {
 		a.logger.Error("publish ws event failed",
 			slog.String("event", "message.updated"),
+			slog.String("chat_id", ev.ChatID),
+			slog.String("message_id", ev.MessageID),
+			slog.String("recipient_user_id", ev.RecipientUserID),
+			slog.String("error", err.Error()))
+	}
+	return err
+}
+
+func (a chatPublisherAdapter) PublishMessageDeleted(ctx context.Context, ev chatsvc.MessageDeletedEvent) error {
+	if a.p == nil {
+		return errors.New("valkey event publisher is nil")
+	}
+	err := a.p.PublishMessageDeleted(ctx, vkrepo.MessageDeletedEvent{
+		MessageID:       ev.MessageID,
+		ChatID:          ev.ChatID,
+		ActorUserID:     ev.ActorUserID,
+		RecipientUserID: ev.RecipientUserID,
+		At:              ev.At,
+	})
+	if err != nil && a.logger != nil {
+		a.logger.Error("publish ws event failed",
+			slog.String("event", "message.deleted"),
 			slog.String("chat_id", ev.ChatID),
 			slog.String("message_id", ev.MessageID),
 			slog.String("recipient_user_id", ev.RecipientUserID),
@@ -197,6 +227,10 @@ func (a mediaStoreAdapter) PutObject(ctx context.Context, objectKey, contentType
 	return a.c.PutObject(ctx, objectKey, contentType, body, size)
 }
 
+func (a mediaStoreAdapter) DeleteObject(ctx context.Context, objectKey string) error {
+	return a.c.DeleteObject(ctx, objectKey)
+}
+
 func Run(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -263,12 +297,16 @@ func Run(ctx context.Context) error {
 	msgRepo := pgrepo.NewMessageRepository(postgresClient)
 	publisher := vkrepo.NewEventPublisher(valkeyClient)
 	statusRepo := vkrepo.NewMessageStatusRepository(valkeyClient)
+	presenceRepo := vkrepo.NewPresenceRepository(valkeyClient)
+	profileRepo := vkrepo.NewProfileSettingsRepository(valkeyClient)
+	emailChangeRepo := vkrepo.NewEmailChangeRepository(valkeyClient)
 
 	chatPublisher := &chatPublisherAdapter{p: publisher, logger: logger}
 	chatSvc, err := chatsvc.NewWithPublisherAndStatusRepo(chatRepo, msgRepo, chatPublisher, statusRepo)
 	if err != nil {
 		return fmt.Errorf("init chat service: %w", err)
 	}
+	chatSvc.SetAvatarStore(minioClient, 0)
 
 	e2eService, err := e2esvc.New(pgrepo.NewE2ERepository(postgresClient))
 	if err != nil {
@@ -281,6 +319,13 @@ func Run(ctx context.Context) error {
 	}
 
 	searchService := searchsvc.New(pgrepo.NewSearchRepository(postgresClient))
+	if searchService != nil {
+		searchService.SetAvatarStore(minioClient, 0)
+	}
+	gifService := gifsvc.New(strings.TrimSpace(os.Getenv("GIPHY_API_KEY")))
+	if !gifService.Enabled() {
+		gifService = nil
+	}
 
 	botTokenRepo := pgrepo.NewBotTokenRepository(postgresClient)
 	botAuthService, err := botauthsvc.New(botTokenRepo, cfg.Bot.TokenPepper)
@@ -319,22 +364,27 @@ func Run(ctx context.Context) error {
 	}
 
 	router := httptransport.NewRouter(httptransport.RouterDeps{
-		Logger:        logger,
-		Postgres:      postgresClient,
-		Valkey:        valkeyClient,
-		ReadyTimeout:  cfg.App.ReadyTimeout,
-		I18n:          catalog,
-		DefaultLocale: cfg.App.DefaultLocale,
-		AccessSecret:  cfg.Auth.AccessSecret,
-		Auth:          authService,
-		EmailCode:     emailCodeAPI,
-		Chat:          chatSvc,
-		Search:        searchService,
-		Media:         mediaService,
-		E2E:           e2eService,
-		BotAuth:       botAuthService,
-		BotTokens:     botAuthService,
-		BotWebhooks:   botWebhookService,
+		Logger:         logger,
+		Postgres:       postgresClient,
+		Valkey:         valkeyClient,
+		ReadyTimeout:   cfg.App.ReadyTimeout,
+		I18n:           catalog,
+		DefaultLocale:  cfg.App.DefaultLocale,
+		AccessSecret:   cfg.Auth.AccessSecret,
+		Auth:           authService,
+		EmailCode:      emailCodeAPI,
+		Chat:           chatSvc,
+		Search:         searchService,
+		GIF:            gifService,
+		Media:          mediaService,
+		E2E:            e2eService,
+		BotAuth:        botAuthService,
+		BotTokens:      botAuthService,
+		BotWebhooks:    botWebhookService,
+		PresenceRepo:   presenceRepo,
+		ProfileRepo:    profileRepo,
+		EmailChange:    emailChangeRepo,
+		EmailChangeTTL: cfg.Auth.EmailVerify.CodeTTL,
 	})
 
 	httpServer := &http.Server{

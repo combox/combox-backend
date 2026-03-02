@@ -88,6 +88,14 @@ func New(cfg Config) (*Service, error) {
 }
 
 func (s *Service) SendCode(ctx context.Context, email, locale string) error {
+	return s.sendCode(ctx, email, locale, true)
+}
+
+func (s *Service) SendCodeEmailOnly(ctx context.Context, email, locale string) error {
+	return s.sendCode(ctx, email, locale, false)
+}
+
+func (s *Service) sendCode(ctx context.Context, email, locale string, notify bool) error {
 	normalized, err := normalizeEmail(email)
 	if err != nil {
 		return err
@@ -124,7 +132,7 @@ func (s *Service) SendCode(ctx context.Context, email, locale string) error {
 
 	deliveredByBot := false
 	var botErr error
-	if s.notifier != nil {
+	if notify && s.notifier != nil {
 		deliveredByBot, botErr = safeBotNotify(func() (bool, error) {
 			return s.notifier.NotifyLoginCode(ctx, normalized, code, expiresAt, locale)
 		})

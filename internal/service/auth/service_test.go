@@ -73,6 +73,63 @@ func (m *memUserRepo) UpdateSessionIdleTTL(_ context.Context, userID string, ses
 	return nil
 }
 
+func (m *memUserRepo) UpdateProfile(_ context.Context, input UpdateProfileInput) (User, error) {
+	if m.usersByID == nil {
+		return User{}, ErrUserNotFound
+	}
+	user, ok := m.usersByID[input.UserID]
+	if !ok {
+		return User{}, ErrUserNotFound
+	}
+
+	if input.Username.Set && input.Username.Value != nil {
+		if existing, ok := m.usersByLogin[*input.Username.Value]; ok && existing.ID != user.ID {
+			return User{}, ErrUsernameTaken
+		}
+		delete(m.usersByLogin, user.Username)
+		user.Username = *input.Username.Value
+	}
+	if input.FirstName.Set && input.FirstName.Value != nil {
+		user.FirstName = *input.FirstName.Value
+	}
+	if input.LastName.Set {
+		user.LastName = input.LastName.Value
+	}
+	if input.BirthDate.Set {
+		user.BirthDate = input.BirthDate.Value
+	}
+	if input.AvatarDataURL.Set {
+		user.AvatarDataURL = input.AvatarDataURL.Value
+	}
+	if input.AvatarGradient.Set {
+		user.AvatarGradient = input.AvatarGradient.Value
+	}
+
+	m.usersByID[user.ID] = user
+	m.usersByLogin[user.Email] = user
+	m.usersByLogin[user.Username] = user
+	return user, nil
+}
+
+func (m *memUserRepo) UpdateEmail(_ context.Context, userID, email string) (User, error) {
+	if m.usersByID == nil {
+		return User{}, ErrUserNotFound
+	}
+	user, ok := m.usersByID[userID]
+	if !ok {
+		return User{}, ErrUserNotFound
+	}
+	if existing, ok := m.usersByLogin[email]; ok && existing.ID != user.ID {
+		return User{}, ErrEmailTaken
+	}
+	delete(m.usersByLogin, user.Email)
+	user.Email = email
+	m.usersByID[user.ID] = user
+	m.usersByLogin[user.Email] = user
+	m.usersByLogin[user.Username] = user
+	return user, nil
+}
+
 type memSessionRepo struct {
 	sessions map[string]Session
 }

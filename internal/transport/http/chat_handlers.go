@@ -41,6 +41,12 @@ type createMessageRequest struct {
 	} `json:"e2e"`
 }
 
+type createDirectMessageRequest struct {
+	RecipientUserID string   `json:"recipient_user_id"`
+	Content         string   `json:"content"`
+	AttachmentIDs   []string `json:"attachment_ids"`
+}
+
 type upsertMessageStatusRequest struct {
 	Status string `json:"status"`
 }
@@ -246,6 +252,43 @@ func newChatsHandler(chat ChatService, i18n Translator, defaultLocale string) ht
 		default:
 			writeMethodNotAllowed(w, r, i18n, defaultLocale)
 		}
+	}
+}
+
+func newDirectMessageHandler(chat ChatService, i18n Translator, defaultLocale string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
+		if userID == "" {
+			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.auth.missing_user_context", nil, i18n, defaultLocale)
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, r, i18n, defaultLocale)
+			return
+		}
+
+		var req createDirectMessageRequest
+		if err := decodeJSON(r, &req); err != nil {
+			writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+			return
+		}
+		created, createdChat, err := chat.CreateDirectMessage(r.Context(), chatsvc.CreateDirectMessageInput{
+			UserID:          userID,
+			RecipientUserID: req.RecipientUserID,
+			Content:         req.Content,
+			AttachmentIDs:   req.AttachmentIDs,
+		})
+		if err != nil {
+			writeChatServiceError(w, r, err, i18n, defaultLocale)
+			return
+		}
+
+		locale := requestLocale(r, defaultLocale)
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"message": i18n.Translate(locale, "message.create.success"),
+			"item":    created,
+			"chat":    createdChat,
+		})
 	}
 }
 

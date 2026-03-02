@@ -36,6 +36,7 @@ services:
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM: ${RESEND_FROM:-Combox <noreply@your-domain.example>}
       RESEND_BASE_URL: ${RESEND_BASE_URL:-https://api.resend.com}
+      GIPHY_API_KEY: ${GIPHY_API_KEY:-}
       BOT_TOKEN_PEPPER: ${BOT_TOKEN_PEPPER:-replace_with_bot_token_pepper_min_32_chars}
       AUTH_ACCESS_TTL: ${AUTH_ACCESS_TTL:-15m}
       AUTH_REFRESH_TTL: ${AUTH_REFRESH_TTL:-720h}

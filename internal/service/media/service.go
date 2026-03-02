@@ -1,10 +1,12 @@
 package media
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 	"time"
 
@@ -17,6 +19,7 @@ const (
 	CodeForbidden       = "forbidden"
 	CodeInternal        = "internal"
 	MaxAttachmentSize   = int64(5 * 1024 * 1024 * 1024) // 5 GiB
+	playbackURLTTL      = 2 * time.Hour
 )
 
 type Error struct {
@@ -95,12 +98,57 @@ type CreateAttachmentOutput struct {
 	} `json:"upload"`
 }
 
+type MediaSession struct {
+	ID            string     `json:"id"`
+	UserID        string     `json:"user_id"`
+	AttachmentID  string     `json:"attachment_id"`
+	Filename      string     `json:"filename"`
+	MimeType      string     `json:"mime_type"`
+	Kind          string     `json:"kind"`
+	Status        string     `json:"status"`
+	PartsTotal    int        `json:"parts_total"`
+	PartsUploaded int        `json:"parts_uploaded"`
+	BytesTotal    *int64     `json:"bytes_total,omitempty"`
+	BytesUploaded int64      `json:"bytes_uploaded"`
+	PlaylistPath  *string    `json:"playlist_path,omitempty"`
+	ErrorCode     *string    `json:"error_code,omitempty"`
+	ErrorMessage  *string    `json:"error_message,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	FinalizedAt   *time.Time `json:"finalized_at,omitempty"`
+}
+
+type CreateSessionInput struct {
+	UserID             string
+	Filename           string
+	MimeType           string
+	Kind               string
+	Variant            string
+	IsClientCompressed bool
+	SizeBytes          *int64
+	Width              *int
+	Height             *int
+	DurationMS         *int
+	PartsCount         int
+}
+
+type CreateSessionOutput struct {
+	Session    MediaSession           `json:"session"`
+	Attachment Attachment             `json:"attachment"`
+	Upload     CreateAttachmentOutput `json:"upload"`
+}
+
 type Repository interface {
 	CreateAttachment(ctx context.Context, a Attachment) (Attachment, error)
 	GetAttachment(ctx context.Context, id string) (Attachment, error)
 	CanUserAccessAttachment(ctx context.Context, userID, attachmentID string) (bool, error)
 	SetAttachmentUploadID(ctx context.Context, id string, uploadID string) error
-	SetProcessing(ctx context.Context, id string, status string, processingError *string, previewObjectKey *string, processedAt *time.Time) error
+	SetProcessing(ctx context.Context, id string, status string, processingError *string, previewObjectKey *string, hlsMasterObjectKey *string, processedAt *time.Time) error
+	CreateSession(ctx context.Context, s MediaSession) (MediaSession, error)
+	GetSession(ctx context.Context, id string) (MediaSession, error)
+	UpdateSessionProgress(ctx context.Context, id string, partsUploaded int, bytesUploaded int64) error
+	MarkSessionFinalized(ctx context.Context, id string, status string, finalizedAt time.Time) error
+	FinalizeSessionByAttachment(ctx context.Context, attachmentID string, status string, playlistPath *string, errorCode *string, errorMessage *string, finalizedAt time.Time) error
 }
 
 type ObjectStore interface {
@@ -111,6 +159,7 @@ type ObjectStore interface {
 	PresignGetObject(ctx context.Context, objectKey string, expires time.Duration) (string, error)
 	GetObject(ctx context.Context, objectKey string) (io.ReadCloser, error)
 	PutObject(ctx context.Context, objectKey, contentType string, body io.Reader, size int64) error
+	DeleteObject(ctx context.Context, objectKey string) error
 }
 
 type Service struct {
@@ -119,6 +168,7 @@ type Service struct {
 }
 
 var ErrAttachmentNotFound = errors.New("attachment not found")
+var ErrMediaSessionNotFound = errors.New("media session not found")
 
 var allowedStreamMIMEs = map[string]struct{}{
 	"video/mp4":       {},
@@ -146,11 +196,6 @@ var allowedStreamMIMEs = map[string]struct{}{
 	"application/ogg": {},
 }
 
-var mkvMIMEs = map[string]struct{}{
-	"video/x-matroska": {},
-	"video/mkv":        {},
-}
-
 func New(repo Repository, store ObjectStore) (*Service, error) {
 	if repo == nil {
 		return nil, errors.New("media repository is required")
@@ -175,9 +220,6 @@ func (s *Service) CreateAttachment(ctx context.Context, input CreateAttachmentIn
 	}
 	if input.SizeBytes != nil && *input.SizeBytes > MaxAttachmentSize {
 		return CreateAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input", Details: map[string]string{"size_bytes": "max_5_gb"}}
-	}
-	if _, isMKV := mkvMIMEs[strings.ToLower(mime)]; isMKV && strings.EqualFold(kind, "video") {
-		return CreateAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.mkv_as_file_only"}
 	}
 	if (strings.HasPrefix(mime, "video/") || strings.HasPrefix(mime, "audio/") || mime == "application/ogg") && !strings.EqualFold(kind, "file") {
 		if _, ok := allowedStreamMIMEs[strings.ToLower(mime)]; !ok {
@@ -299,6 +341,11 @@ type GetAttachmentOutput struct {
 	PreviewURL *string    `json:"preview_url,omitempty"`
 }
 
+type AttachmentDownloadOutput struct {
+	URL      string `json:"url"`
+	Filename string `json:"filename"`
+}
+
 func (s *Service) GetAttachment(ctx context.Context, requesterUserID, attachmentID string) (GetAttachmentOutput, error) {
 	requesterUserID = strings.TrimSpace(requesterUserID)
 	attachmentID = strings.TrimSpace(attachmentID)
@@ -323,9 +370,19 @@ func (s *Service) GetAttachment(ctx context.Context, requesterUserID, attachment
 		}
 	}
 
-	urlStr, err := s.store.PresignGetObject(ctx, a.ObjectKey, 15*time.Minute)
-	if err != nil {
-		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	urlStr := ""
+	if (strings.EqualFold(a.Kind, "video") || strings.EqualFold(a.Kind, "audio")) && a.HLSMasterObjectKey != nil && strings.TrimSpace(*a.HLSMasterObjectKey) != "" {
+		hlsURL, hlsErr := s.presignHLSPlaybackManifest(ctx, strings.TrimSpace(*a.HLSMasterObjectKey), playbackURLTTL)
+		if hlsErr == nil && strings.TrimSpace(hlsURL) != "" {
+			urlStr = hlsURL
+		}
+	}
+	if strings.TrimSpace(urlStr) == "" {
+		var err error
+		urlStr, err = s.store.PresignGetObject(ctx, a.ObjectKey, playbackURLTTL)
+		if err != nil {
+			return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+		}
 	}
 
 	var previewURL *string
@@ -337,4 +394,224 @@ func (s *Service) GetAttachment(ctx context.Context, requesterUserID, attachment
 	}
 
 	return GetAttachmentOutput{Attachment: a, URL: urlStr, PreviewURL: previewURL}, nil
+}
+
+func (s *Service) presignHLSPlaybackManifest(ctx context.Context, masterKey string, ttl time.Duration) (string, error) {
+	rc, err := s.store.GetObject(ctx, masterKey)
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+
+	raw, err := io.ReadAll(rc)
+	if err != nil {
+		return "", err
+	}
+
+	baseDir := path.Dir(strings.TrimSpace(masterKey))
+	scanner := bufio.NewScanner(strings.NewReader(string(raw)))
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+
+	var out strings.Builder
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "#EXT-X-MAP:") {
+			rewritten, rewriteErr := s.rewriteHLSMapLine(ctx, baseDir, line, ttl)
+			if rewriteErr != nil {
+				return "", rewriteErr
+			}
+			out.WriteString(rewritten)
+			out.WriteByte('\n')
+			continue
+		}
+
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			signed, signErr := s.signHLSReference(ctx, baseDir, trimmed, ttl)
+			if signErr != nil {
+				return "", signErr
+			}
+			out.WriteString(signed)
+			out.WriteByte('\n')
+			continue
+		}
+
+		out.WriteString(line)
+		out.WriteByte('\n')
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+
+	signedKey := path.Join(baseDir, "signed.m3u8")
+	payload := out.String()
+	if putErr := s.store.PutObject(ctx, signedKey, "application/vnd.apple.mpegurl", strings.NewReader(payload), int64(len(payload))); putErr != nil {
+		return "", putErr
+	}
+	return s.store.PresignGetObject(ctx, signedKey, ttl)
+}
+
+func (s *Service) rewriteHLSMapLine(ctx context.Context, baseDir, line string, ttl time.Duration) (string, error) {
+	const marker = `URI="`
+	start := strings.Index(line, marker)
+	if start < 0 {
+		return line, nil
+	}
+	valueStart := start + len(marker)
+	endRel := strings.Index(line[valueStart:], `"`)
+	if endRel < 0 {
+		return line, nil
+	}
+	valueEnd := valueStart + endRel
+	ref := strings.TrimSpace(line[valueStart:valueEnd])
+	if ref == "" {
+		return line, nil
+	}
+
+	signed, err := s.signHLSReference(ctx, baseDir, ref, ttl)
+	if err != nil {
+		return "", err
+	}
+	return line[:valueStart] + signed + line[valueEnd:], nil
+}
+
+func (s *Service) signHLSReference(ctx context.Context, baseDir, ref string, ttl time.Duration) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
+		return ref, nil
+	}
+	objectKey := path.Clean(path.Join(baseDir, ref))
+	return s.store.PresignGetObject(ctx, objectKey, ttl)
+}
+
+func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (CreateSessionOutput, error) {
+	created, err := s.CreateAttachment(ctx, CreateAttachmentInput{
+		UserID:             input.UserID,
+		Filename:           input.Filename,
+		MimeType:           input.MimeType,
+		Kind:               input.Kind,
+		Variant:            input.Variant,
+		IsClientCompressed: input.IsClientCompressed,
+		SizeBytes:          input.SizeBytes,
+		Width:              input.Width,
+		Height:             input.Height,
+		DurationMS:         input.DurationMS,
+		PartsCount:         input.PartsCount,
+	})
+	if err != nil {
+		return CreateSessionOutput{}, err
+	}
+
+	session := MediaSession{
+		ID:            uuid.NewString(),
+		UserID:        strings.TrimSpace(input.UserID),
+		AttachmentID:  created.Attachment.ID,
+		Filename:      created.Attachment.Filename,
+		MimeType:      created.Attachment.MimeType,
+		Kind:          created.Attachment.Kind,
+		Status:        "uploading",
+		PartsTotal:    input.PartsCount,
+		BytesTotal:    input.SizeBytes,
+		BytesUploaded: 0,
+	}
+	session, repoErr := s.repo.CreateSession(ctx, session)
+	if repoErr != nil {
+		return CreateSessionOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: repoErr}
+	}
+
+	return CreateSessionOutput{
+		Session:    session,
+		Attachment: created.Attachment,
+		Upload:     created,
+	}, nil
+}
+
+func (s *Service) PresignSessionPart(ctx context.Context, requesterUserID, sessionID string, partNumber int, _ string) (PartURLOutput, error) {
+	session, attachment, err := s.getSessionOwned(ctx, requesterUserID, sessionID)
+	if err != nil {
+		return PartURLOutput{}, err
+	}
+	if session.Status != "uploading" {
+		return PartURLOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+	}
+	if attachment.UploadID == nil || strings.TrimSpace(*attachment.UploadID) == "" {
+		return PartURLOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+	}
+
+	out, err := s.PresignPart(ctx, requesterUserID, attachment.ID, strings.TrimSpace(*attachment.UploadID), partNumber)
+	if err != nil {
+		return PartURLOutput{}, err
+	}
+	partsUploaded := session.PartsUploaded
+	if partNumber > partsUploaded {
+		partsUploaded = partNumber
+	}
+	_ = s.repo.UpdateSessionProgress(ctx, session.ID, partsUploaded, session.BytesUploaded)
+	return out, nil
+}
+
+func (s *Service) CompleteSession(ctx context.Context, requesterUserID, sessionID string, parts []CompletePart) (MediaSession, error) {
+	session, attachment, err := s.getSessionOwned(ctx, requesterUserID, sessionID)
+	if err != nil {
+		return MediaSession{}, err
+	}
+	if attachment.UploadID == nil || strings.TrimSpace(*attachment.UploadID) == "" {
+		return MediaSession{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+	}
+	if _, err := s.CompleteMultipart(ctx, requesterUserID, attachment.ID, strings.TrimSpace(*attachment.UploadID), parts); err != nil {
+		return MediaSession{}, err
+	}
+	finalStatus := "ready"
+	if strings.EqualFold(session.Kind, "video") || strings.EqualFold(session.Kind, "audio") {
+		finalStatus = "processing"
+	}
+	if repoErr := s.repo.MarkSessionFinalized(ctx, session.ID, finalStatus, time.Now().UTC()); repoErr != nil {
+		return MediaSession{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: repoErr}
+	}
+	updated, repoErr := s.repo.GetSession(ctx, session.ID)
+	if repoErr != nil {
+		return MediaSession{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: repoErr}
+	}
+	return updated, nil
+}
+
+func (s *Service) GetSession(ctx context.Context, requesterUserID, sessionID string) (MediaSession, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	requesterUserID = strings.TrimSpace(requesterUserID)
+	if sessionID == "" || requesterUserID == "" {
+		return MediaSession{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+	}
+	session, err := s.repo.GetSession(ctx, sessionID)
+	if err != nil {
+		if errors.Is(err, ErrMediaSessionNotFound) {
+			return MediaSession{}, &Error{Code: CodeNotFound, MessageKey: "error.media.not_found", Cause: err}
+		}
+		return MediaSession{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+	if session.UserID != requesterUserID {
+		return MediaSession{}, &Error{Code: CodeForbidden, MessageKey: "error.media.forbidden"}
+	}
+	return session, nil
+}
+
+func (s *Service) getSessionOwned(ctx context.Context, requesterUserID, sessionID string) (MediaSession, Attachment, error) {
+	session, err := s.GetSession(ctx, requesterUserID, sessionID)
+	if err != nil {
+		return MediaSession{}, Attachment{}, err
+	}
+	attachment, err := s.repo.GetAttachment(ctx, session.AttachmentID)
+	if err != nil {
+		if errors.Is(err, ErrAttachmentNotFound) {
+			return MediaSession{}, Attachment{}, &Error{Code: CodeNotFound, MessageKey: "error.media.not_found", Cause: err}
+		}
+		return MediaSession{}, Attachment{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+	if attachment.UserID != requesterUserID {
+		return MediaSession{}, Attachment{}, &Error{Code: CodeForbidden, MessageKey: "error.media.forbidden"}
+	}
+	return session, attachment, nil
 }

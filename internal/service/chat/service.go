@@ -200,6 +200,22 @@ func (s *Service) DeleteMessageByID(ctx context.Context, userID, messageID strin
 		return &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
 	}
 
+	if s.publisher != nil {
+		members, listErr := s.chats.ListChatMemberIDs(ctx, meta.ChatID)
+		if listErr == nil {
+			now := s.nowUTC()
+			for _, memberID := range members {
+				_ = s.publisher.PublishMessageDeleted(ctx, MessageDeletedEvent{
+					MessageID:       meta.ID,
+					ChatID:          meta.ChatID,
+					ActorUserID:     userID,
+					RecipientUserID: memberID,
+					At:              now,
+				})
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -275,15 +291,16 @@ func (e *Error) Unwrap() error {
 }
 
 type Chat struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	IsDirect  bool      `json:"is_direct"`
-	Type      string    `json:"type"`
-	Kind      string    `json:"kind"`
-	BotID     *string   `json:"bot_id,omitempty"`
-	AvatarURL *string   `json:"avatar_data_url,omitempty"`
-	AvatarBg  *string   `json:"avatar_gradient,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string    `json:"id"`
+	Title      string    `json:"title"`
+	IsDirect   bool      `json:"is_direct"`
+	Type       string    `json:"type"`
+	Kind       string    `json:"kind"`
+	BotID      *string   `json:"bot_id,omitempty"`
+	PeerUserID *string   `json:"peer_user_id,omitempty"`
+	AvatarURL  *string   `json:"avatar_data_url,omitempty"`
+	AvatarBg   *string   `json:"avatar_gradient,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type Message struct {
@@ -341,6 +358,13 @@ type ListMessagesInput struct {
 	DeviceID string
 }
 
+type CreateDirectMessageInput struct {
+	UserID          string
+	RecipientUserID string
+	Content         string
+	AttachmentIDs   []string
+}
+
 type ChatRepository interface {
 	CreateChat(ctx context.Context, title string, memberIDs []string, creatorID string, chatType string) (Chat, error)
 	FindDirectChatByMembers(ctx context.Context, userAID, userBID, chatType string) (Chat, bool, error)
@@ -375,6 +399,7 @@ type MessageEventPublisher interface {
 	PublishUserMessageCreated(ctx context.Context, ev UserMessageCreatedEvent) error
 	PublishMessageStatus(ctx context.Context, ev MessageStatusEvent) error
 	PublishMessageUpdated(ctx context.Context, ev MessageUpdatedEvent) error
+	PublishMessageDeleted(ctx context.Context, ev MessageDeletedEvent) error
 	PublishMessageReaction(ctx context.Context, ev MessageReactionEvent) error
 }
 
@@ -434,6 +459,14 @@ type MessageReactionEvent struct {
 	At              time.Time
 }
 
+type MessageDeletedEvent struct {
+	MessageID       string
+	ChatID          string
+	ActorUserID     string
+	RecipientUserID string
+	At              time.Time
+}
+
 type EditMessageInput struct {
 	UserID    string
 	ChatID    string
@@ -459,11 +492,22 @@ type Service struct {
 	messages   MessageRepository
 	publisher  MessageEventPublisher
 	statusRepo StatusRepository
+	avatars    AvatarStore
+	avatarTTL  time.Duration
 }
 
 var ErrChatNotFound = errors.New("chat not found")
 var ErrMessageNotFound = errors.New("message not found")
 var ErrInvalidAttachments = errors.New("invalid attachments")
+
+const (
+	avatarRefPrefix  = "s3key:"
+	defaultAvatarTTL = time.Hour * 24 * 7
+)
+
+type AvatarStore interface {
+	PresignGetObject(ctx context.Context, objectKey string, expires time.Duration) (string, error)
+}
 
 func New(chats ChatRepository, messages MessageRepository) (*Service, error) {
 	if chats == nil {
@@ -491,6 +535,43 @@ func NewWithPublisherAndStatusRepo(chats ChatRepository, messages MessageReposit
 	}
 	svc.statusRepo = statusRepo
 	return svc, nil
+}
+
+func (s *Service) SetAvatarStore(store AvatarStore, ttl time.Duration) {
+	s.avatars = store
+	if ttl <= 0 {
+		ttl = defaultAvatarTTL
+	}
+	s.avatarTTL = ttl
+}
+
+func (s *Service) resolveAvatarURL(ctx context.Context, raw *string) *string {
+	if raw == nil {
+		return nil
+	}
+	ref := strings.TrimSpace(*raw)
+	if ref == "" {
+		return nil
+	}
+	if !strings.HasPrefix(ref, avatarRefPrefix) {
+		return &ref
+	}
+	if s.avatars == nil {
+		return nil
+	}
+	objectKey := strings.TrimSpace(strings.TrimPrefix(ref, avatarRefPrefix))
+	if objectKey == "" {
+		return nil
+	}
+	ttl := s.avatarTTL
+	if ttl <= 0 {
+		ttl = defaultAvatarTTL
+	}
+	presigned, err := s.avatars.PresignGetObject(ctx, objectKey, ttl)
+	if err != nil {
+		return nil
+	}
+	return &presigned
 }
 
 func (s *Service) CreateChat(ctx context.Context, input CreateChatInput) (Chat, error) {
@@ -533,6 +614,46 @@ func (s *Service) CreateChat(ctx context.Context, input CreateChatInput) (Chat, 
 		}
 	}
 	return created, nil
+}
+
+func (s *Service) CreateDirectMessage(ctx context.Context, input CreateDirectMessageInput) (Message, Chat, error) {
+	userID := strings.TrimSpace(input.UserID)
+	recipientID := strings.TrimSpace(input.RecipientUserID)
+	content := strings.TrimSpace(input.Content)
+	if userID == "" || recipientID == "" {
+		return Message{}, Chat{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input"}
+	}
+	if userID == recipientID {
+		return Message{}, Chat{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input"}
+	}
+	if content == "" && len(input.AttachmentIDs) == 0 {
+		return Message{}, Chat{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.message.invalid_input"}
+	}
+
+	existing, found, err := s.chats.FindDirectChatByMembers(ctx, userID, recipientID, ChatTypeStandard)
+	if err != nil {
+		return Message{}, Chat{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+
+	chatRef := existing
+	if !found {
+		created, err := s.chats.CreateChat(ctx, recipientID, []string{recipientID, userID}, userID, ChatTypeStandard)
+		if err != nil {
+			return Message{}, Chat{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+		}
+		chatRef = created
+	}
+
+	msg, err := s.CreateMessage(ctx, CreateMessageInput{
+		UserID:        userID,
+		ChatID:        chatRef.ID,
+		Content:       content,
+		AttachmentIDs: input.AttachmentIDs,
+	})
+	if err != nil {
+		return Message{}, Chat{}, err
+	}
+	return msg, chatRef, nil
 }
 
 func (s *Service) ToggleMessageReactionByID(ctx context.Context, userID, messageID, emoji string) ([]MessageReaction, string, error) {
@@ -607,6 +728,9 @@ func (s *Service) ListChats(ctx context.Context, userID string) ([]Chat, error) 
 			MessageKey: "error.internal",
 			Cause:      err,
 		}
+	}
+	for i := range chats {
+		chats[i].AvatarURL = s.resolveAvatarURL(ctx, chats[i].AvatarURL)
 	}
 	return chats, nil
 }

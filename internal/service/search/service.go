@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"strings"
+	"time"
 )
 
 const (
@@ -39,7 +40,9 @@ type Repository interface {
 }
 
 type Service struct {
-	repo Repository
+	repo       Repository
+	avatars    AvatarStore
+	avatarTTL  time.Duration
 }
 
 func New(repo Repository) *Service {
@@ -47,6 +50,64 @@ func New(repo Repository) *Service {
 		return nil
 	}
 	return &Service{repo: repo}
+}
+
+const (
+	avatarRefPrefix  = "s3key:"
+	defaultAvatarTTL = time.Hour * 24 * 7
+)
+
+type AvatarStore interface {
+	PresignGetObject(ctx context.Context, objectKey string, expires time.Duration) (string, error)
+}
+
+func (s *Service) SetAvatarStore(store AvatarStore, ttl time.Duration) {
+	s.avatars = store
+	if ttl <= 0 {
+		ttl = defaultAvatarTTL
+	}
+	s.avatarTTL = ttl
+}
+
+func (s *Service) resolveAvatarURL(ctx context.Context, raw *string) *string {
+	if raw == nil {
+		return nil
+	}
+	ref := strings.TrimSpace(*raw)
+	if ref == "" {
+		return nil
+	}
+	if !strings.HasPrefix(ref, avatarRefPrefix) {
+		return &ref
+	}
+	if s.avatars == nil {
+		return nil
+	}
+	objectKey := strings.TrimSpace(strings.TrimPrefix(ref, avatarRefPrefix))
+	if objectKey == "" {
+		return nil
+	}
+	ttl := s.avatarTTL
+	if ttl <= 0 {
+		ttl = defaultAvatarTTL
+	}
+	presigned, err := s.avatars.PresignGetObject(ctx, objectKey, ttl)
+	if err != nil {
+		return nil
+	}
+	return &presigned
+}
+
+func (s *Service) resolveUsersAvatars(ctx context.Context, users []UserResult) []UserResult {
+	if len(users) == 0 {
+		return users
+	}
+	out := make([]UserResult, len(users))
+	copy(out, users)
+	for i := range out {
+		out[i].AvatarDataURL = s.resolveAvatarURL(ctx, out[i].AvatarDataURL)
+	}
+	return out
 }
 
 func (s *Service) Search(ctx context.Context, q string, scope string, limit int) (Results, error) {
@@ -73,7 +134,7 @@ func (s *Service) Search(ctx context.Context, q string, scope string, limit int)
 		if err != nil {
 			return Results{}, err
 		}
-		out.Users = items
+		out.Users = s.resolveUsersAvatars(ctx, items)
 		return out, nil
 	case ScopeChats:
 		items, err := s.repo.SearchPublicChats(ctx, q, limit)
@@ -91,7 +152,7 @@ func (s *Service) Search(ctx context.Context, q string, scope string, limit int)
 		if err != nil {
 			return Results{}, err
 		}
-		out.Users = users
+		out.Users = s.resolveUsersAvatars(ctx, users)
 		out.Chats = chats
 		return out, nil
 	default:
@@ -103,7 +164,7 @@ func (s *Service) Search(ctx context.Context, q string, scope string, limit int)
 		if err != nil {
 			return Results{}, err
 		}
-		out.Users = users
+		out.Users = s.resolveUsersAvatars(ctx, users)
 		out.Chats = chats
 		return out, nil
 	}

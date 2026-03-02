@@ -476,6 +476,10 @@ func (stubChatService) CreateMessage(context.Context, chatsvc.CreateMessageInput
 	return chatsvc.Message{}, nil
 }
 
+func (stubChatService) CreateDirectMessage(context.Context, chatsvc.CreateDirectMessageInput) (chatsvc.Message, chatsvc.Chat, error) {
+	return chatsvc.Message{}, chatsvc.Chat{}, nil
+}
+
 func (stubChatService) ListMessages(context.Context, chatsvc.ListMessagesInput) (chatsvc.MessagePage, error) {
 	return chatsvc.MessagePage{}, nil
 }
@@ -593,6 +597,33 @@ func (s stubAuthService) Refresh(context.Context, authsvc.RefreshInput) (authsvc
 
 func (s stubAuthService) Logout(context.Context, authsvc.LogoutInput) error {
 	return nil
+}
+
+func (s stubAuthService) GetProfile(context.Context, string) (authsvc.User, error) {
+	return authsvc.User{
+		ID:        "u1",
+		Email:     "user@example.com",
+		Username:  "user",
+		FirstName: "User",
+	}, nil
+}
+
+func (s stubAuthService) UpdateProfile(context.Context, authsvc.UpdateProfileInput) (authsvc.User, error) {
+	return authsvc.User{
+		ID:        "u1",
+		Email:     "user@example.com",
+		Username:  "user",
+		FirstName: "User",
+	}, nil
+}
+
+func (s stubAuthService) UpdateEmail(context.Context, string, string) (authsvc.User, error) {
+	return authsvc.User{
+		ID:        "u1",
+		Email:     "user2@example.com",
+		Username:  "user",
+		FirstName: "User",
+	}, nil
 }
 
 func TestRegisterRouteReturnsErrorEnvelope(t *testing.T) {

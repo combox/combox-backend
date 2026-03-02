@@ -148,6 +148,13 @@ func (c *Client) PutObject(ctx context.Context, objectKey, contentType string, b
 	return err
 }
 
+func (c *Client) DeleteObject(ctx context.Context, objectKey string) error {
+	if c == nil || c.c == nil {
+		return nil
+	}
+	return c.c.RemoveObject(ctx, c.bucket, strings.TrimSpace(objectKey), minio.RemoveObjectOptions{})
+}
+
 func (c *Client) putOptions(contentType string) minio.PutObjectOptions {
 	opts := minio.PutObjectOptions{ContentType: strings.TrimSpace(contentType)}
 	if c == nil {

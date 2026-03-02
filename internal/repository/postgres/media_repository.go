@@ -167,13 +167,14 @@ func (r *MediaRepository) SetAttachmentUploadID(ctx context.Context, id string, 
 	return err
 }
 
-func (r *MediaRepository) SetProcessing(ctx context.Context, id string, status string, processingError *string, previewObjectKey *string, processedAt *time.Time) error {
+func (r *MediaRepository) SetProcessing(ctx context.Context, id string, status string, processingError *string, previewObjectKey *string, hlsMasterObjectKey *string, processedAt *time.Time) error {
 	const q = `
 		UPDATE attachments
 		SET processing_status = $2,
 		    processing_error = $3,
 		    preview_object_key = $4,
-		    processed_at = $5,
+		    hls_master_object_key = $5,
+		    processed_at = $6,
 		    updated_at = NOW()
 		WHERE id = $1::uuid
 	`
@@ -184,7 +185,149 @@ func (r *MediaRepository) SetProcessing(ctx context.Context, id string, status s
 		strings.TrimSpace(status),
 		processingError,
 		previewObjectKey,
+		hlsMasterObjectKey,
 		processedAt,
+	)
+	return err
+}
+
+func (r *MediaRepository) CreateSession(ctx context.Context, s media.MediaSession) (media.MediaSession, error) {
+	const q = `
+		INSERT INTO media_sessions (
+			id, user_id, attachment_id, filename, mime_type, kind, status,
+			parts_total, parts_uploaded, bytes_total, bytes_uploaded, playlist_path, error_code, error_message, finalized_at
+		)
+		VALUES (
+			$1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7,
+			$8, $9, $10, $11, $12, $13, $14, $15
+		)
+		RETURNING id::text, user_id::text, attachment_id::text, filename, mime_type, kind, status,
+			parts_total, parts_uploaded, bytes_total, bytes_uploaded, playlist_path, error_code, error_message, created_at, updated_at, finalized_at
+	`
+	var out media.MediaSession
+	err := r.client.pool.QueryRow(
+		ctx,
+		q,
+		strings.TrimSpace(s.ID),
+		strings.TrimSpace(s.UserID),
+		strings.TrimSpace(s.AttachmentID),
+		strings.TrimSpace(s.Filename),
+		strings.TrimSpace(s.MimeType),
+		strings.TrimSpace(s.Kind),
+		strings.TrimSpace(s.Status),
+		s.PartsTotal,
+		s.PartsUploaded,
+		s.BytesTotal,
+		s.BytesUploaded,
+		s.PlaylistPath,
+		s.ErrorCode,
+		s.ErrorMessage,
+		s.FinalizedAt,
+	).Scan(
+		&out.ID,
+		&out.UserID,
+		&out.AttachmentID,
+		&out.Filename,
+		&out.MimeType,
+		&out.Kind,
+		&out.Status,
+		&out.PartsTotal,
+		&out.PartsUploaded,
+		&out.BytesTotal,
+		&out.BytesUploaded,
+		&out.PlaylistPath,
+		&out.ErrorCode,
+		&out.ErrorMessage,
+		&out.CreatedAt,
+		&out.UpdatedAt,
+		&out.FinalizedAt,
+	)
+	if err != nil {
+		return media.MediaSession{}, err
+	}
+	return out, nil
+}
+
+func (r *MediaRepository) GetSession(ctx context.Context, id string) (media.MediaSession, error) {
+	const q = `
+		SELECT id::text, user_id::text, attachment_id::text, filename, mime_type, kind, status,
+			parts_total, parts_uploaded, bytes_total, bytes_uploaded, playlist_path, error_code, error_message, created_at, updated_at, finalized_at
+		FROM media_sessions
+		WHERE id = $1::uuid
+		LIMIT 1
+	`
+	var out media.MediaSession
+	if err := r.client.pool.QueryRow(ctx, q, strings.TrimSpace(id)).Scan(
+		&out.ID,
+		&out.UserID,
+		&out.AttachmentID,
+		&out.Filename,
+		&out.MimeType,
+		&out.Kind,
+		&out.Status,
+		&out.PartsTotal,
+		&out.PartsUploaded,
+		&out.BytesTotal,
+		&out.BytesUploaded,
+		&out.PlaylistPath,
+		&out.ErrorCode,
+		&out.ErrorMessage,
+		&out.CreatedAt,
+		&out.UpdatedAt,
+		&out.FinalizedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return media.MediaSession{}, media.ErrMediaSessionNotFound
+		}
+		return media.MediaSession{}, err
+	}
+	return out, nil
+}
+
+func (r *MediaRepository) UpdateSessionProgress(ctx context.Context, id string, partsUploaded int, bytesUploaded int64) error {
+	const q = `
+		UPDATE media_sessions
+		SET parts_uploaded = GREATEST(parts_uploaded, $2),
+		    bytes_uploaded = GREATEST(bytes_uploaded, $3),
+		    updated_at = NOW()
+		WHERE id = $1::uuid
+	`
+	_, err := r.client.pool.Exec(ctx, q, strings.TrimSpace(id), partsUploaded, bytesUploaded)
+	return err
+}
+
+func (r *MediaRepository) MarkSessionFinalized(ctx context.Context, id string, status string, finalizedAt time.Time) error {
+	const q = `
+		UPDATE media_sessions
+		SET status = $2,
+		    finalized_at = $3,
+		    updated_at = NOW()
+		WHERE id = $1::uuid
+	`
+	_, err := r.client.pool.Exec(ctx, q, strings.TrimSpace(id), strings.TrimSpace(status), finalizedAt)
+	return err
+}
+
+func (r *MediaRepository) FinalizeSessionByAttachment(ctx context.Context, attachmentID string, status string, playlistPath *string, errorCode *string, errorMessage *string, finalizedAt time.Time) error {
+	const q = `
+		UPDATE media_sessions
+		SET status = $2,
+		    playlist_path = COALESCE($3, playlist_path),
+		    error_code = $4,
+		    error_message = $5,
+		    finalized_at = $6,
+		    updated_at = NOW()
+		WHERE attachment_id = $1::uuid
+	`
+	_, err := r.client.pool.Exec(
+		ctx,
+		q,
+		strings.TrimSpace(attachmentID),
+		strings.TrimSpace(status),
+		playlistPath,
+		errorCode,
+		errorMessage,
+		finalizedAt,
 	)
 	return err
 }

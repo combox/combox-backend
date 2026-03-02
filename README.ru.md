@@ -151,6 +151,7 @@ HTTP_ADDRESS=:8443
 - `STRINGS_PATH` - Путь к директории i18n строк
 - `AUTH_ACCESS_SECRET` - Секрет для подписи JWT access токенов
 - `AUTH_REFRESH_SECRET` - Секрет для подписи JWT refresh токенов
+- `GIPHY_API_KEY` - API ключ для интеграции поиска/популярных/недавних GIF
 
 Опциональные переменные имеют значения по умолчанию в `.env.example`.
 

@@ -151,6 +151,7 @@ Required variables:
 - `STRINGS_PATH` - Path to i18n strings directory
 - `AUTH_ACCESS_SECRET` - JWT access token signing secret
 - `AUTH_REFRESH_SECRET` - JWT refresh token signing secret
+- `GIPHY_API_KEY` - API key for GIF search/trending/recent integrations
 
 Optional variables have defaults in `.env.example`.
 

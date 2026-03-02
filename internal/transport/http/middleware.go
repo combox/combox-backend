@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	vkrepo "combox-backend/internal/repository/valkey"
 	botauthsvc "combox-backend/internal/service/botauth"
 
 	"github.com/google/uuid"
@@ -112,6 +113,33 @@ func AuthMiddleware(accessSecret string, i18n Translator, defaultLocale string) 
 	}
 }
 
+func PresenceHeartbeatMiddleware(valkey ValkeyClient) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := strings.TrimSpace(r.URL.Path)
+			if !strings.HasPrefix(path, "/api/private/v1/") || strings.HasSuffix(path, "/ws") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
+			if userID == "" || valkey == nil || valkey.Client() == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			now := time.Now().UTC()
+			presenceRepo := vkrepo.NewPresenceRepositoryFromRedis(valkey.Client())
+			eventPublisher := vkrepo.NewEventPublisherFromRedis(valkey.Client())
+			_ = presenceRepo.SetOnline(r.Context(), userID, now, 90*time.Second)
+			_ = eventPublisher.PublishPresence(r.Context(), vkrepo.PresenceEvent{
+				UserID:    userID,
+				Online:    true,
+				LastSeen:  now,
+				UpdatedAt: now,
+			})
+			next.ServeHTTP(w, r)
+		})
+	}
+}
 func RequestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := r.Header.Get("X-Request-ID")

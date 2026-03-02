@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,29 +34,51 @@ var gradientPalette = [][2]color.RGBA{
 }
 
 func (s *Service) processPreviewAsync(ctx context.Context, a Attachment) {
-	_ = s.repo.SetProcessing(ctx, a.ID, "processing", nil, nil, nil)
+	_ = s.repo.SetProcessing(ctx, a.ID, "processing", nil, nil, nil, nil)
+
+	fail := func(err error) {
+		msg := err.Error()
+		now := time.Now().UTC()
+		_ = s.repo.SetProcessing(ctx, a.ID, "failed", &msg, nil, nil, nil)
+		errorCode := "hls_failed"
+		_ = s.repo.FinalizeSessionByAttachment(ctx, a.ID, "failed", nil, &errorCode, &msg, now)
+	}
 
 	previewBytes, err := s.buildPreview(ctx, a)
 	if err != nil {
-		msg := err.Error()
-		_ = s.repo.SetProcessing(ctx, a.ID, "failed", &msg, nil, nil)
-		return
-	}
-	if len(previewBytes) == 0 {
-		now := time.Now().UTC()
-		_ = s.repo.SetProcessing(ctx, a.ID, "ready", nil, nil, &now)
+		fail(err)
 		return
 	}
 
-	previewKey := fmt.Sprintf("u/%s/%s/preview/tiny.jpg", strings.TrimSpace(a.UserID), strings.TrimSpace(a.ID))
-	if err := s.store.PutObject(ctx, previewKey, "image/jpeg", bytes.NewReader(previewBytes), int64(len(previewBytes))); err != nil {
-		msg := err.Error()
-		_ = s.repo.SetProcessing(ctx, a.ID, "failed", &msg, nil, nil)
-		return
+	var hlsMasterKey *string
+	if strings.EqualFold(a.Kind, "video") || strings.EqualFold(a.Kind, "audio") {
+		masterKey, hlsErr := s.buildAndUploadHLSCopy(ctx, a)
+		if hlsErr != nil {
+			fail(hlsErr)
+			return
+		}
+		hlsMasterKey = &masterKey
+		if shouldDeleteOriginalAfterHLS() {
+			if delErr := s.store.DeleteObject(ctx, a.ObjectKey); delErr != nil {
+				fail(fmt.Errorf("delete original after hls failed: %w", delErr))
+				return
+			}
+		}
+	}
+
+	var previewKey *string
+	if len(previewBytes) > 0 {
+		key := fmt.Sprintf("u/%s/%s/preview/tiny.jpg", strings.TrimSpace(a.UserID), strings.TrimSpace(a.ID))
+		if err := s.store.PutObject(ctx, key, "image/jpeg", bytes.NewReader(previewBytes), int64(len(previewBytes))); err != nil {
+			fail(err)
+			return
+		}
+		previewKey = &key
 	}
 
 	now := time.Now().UTC()
-	_ = s.repo.SetProcessing(ctx, a.ID, "ready", nil, &previewKey, &now)
+	_ = s.repo.SetProcessing(ctx, a.ID, "ready", nil, previewKey, hlsMasterKey, &now)
+	_ = s.repo.FinalizeSessionByAttachment(ctx, a.ID, "ready", hlsMasterKey, nil, nil, now)
 }
 
 func (s *Service) buildPreview(ctx context.Context, a Attachment) ([]byte, error) {
@@ -273,4 +296,128 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func shouldDeleteOriginalAfterHLS() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("MEDIA_DELETE_ORIGINAL_AFTER_HLS")))
+	enabled, err := strconv.ParseBool(v)
+	if err != nil {
+		return false
+	}
+	return enabled
+}
+
+func probePrimaryVideoCodec(ctx context.Context, inputPath string) (string, error) {
+	ffprobePath, err := exec.LookPath("ffprobe")
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(
+		ctx,
+		ffprobePath,
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=codec_name",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		inputPath,
+	)
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		return "", fmt.Errorf("ffprobe failed: %w (%s)", runErr, strings.TrimSpace(string(out)))
+	}
+	return strings.ToLower(strings.TrimSpace(string(out))), nil
+}
+
+func (s *Service) buildAndUploadHLSCopy(ctx context.Context, a Attachment) (string, error) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return "", fmt.Errorf("ffmpeg is not available: %w", err)
+	}
+
+	inputPath, cleanupIn, err := s.downloadToTempFile(ctx, a.ObjectKey)
+	if err != nil {
+		return "", err
+	}
+	defer cleanupIn()
+
+	workDir, err := os.MkdirTemp("", "combox-hls-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.RemoveAll(workDir) }()
+
+	masterPath := filepath.Join(workDir, "master.m3u8")
+	segmentPattern := filepath.Join(workDir, "seg_%06d.m4s")
+	args := []string{
+		"-y",
+		"-i", inputPath,
+		"-map", "0:v?",
+		"-map", "0:a?",
+		"-sn",
+		"-dn",
+		"-c", "copy",
+	}
+	// Safari and some embedded players reject HEVC fMP4 tagged as "hev1".
+	// Keep copy-mode, but retag to "hvc1" when the source video codec is HEVC.
+	if codecName, probeErr := probePrimaryVideoCodec(ctx, inputPath); probeErr == nil && codecName == "hevc" {
+		args = append(args, "-tag:v:0", "hvc1")
+	}
+	args = append(args,
+		"-f", "hls",
+		"-hls_time", "4",
+		"-hls_playlist_type", "vod",
+		"-hls_flags", "independent_segments",
+		"-hls_segment_type", "fmp4",
+		"-hls_fmp4_init_filename", "init.mp4",
+		"-hls_segment_filename", segmentPattern,
+		masterPath,
+	)
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	if out, runErr := cmd.CombinedOutput(); runErr != nil {
+		return "", fmt.Errorf("ffmpeg hls copy failed: %w (%s)", runErr, strings.TrimSpace(string(out)))
+	}
+
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return "", err
+	}
+
+	baseKey := fmt.Sprintf("u/%s/%s/hls", strings.TrimSpace(a.UserID), strings.TrimSpace(a.ID))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if name == "" {
+			continue
+		}
+		localPath := filepath.Join(workDir, name)
+		info, statErr := os.Stat(localPath)
+		if statErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+
+		contentType := "application/octet-stream"
+		switch strings.ToLower(filepath.Ext(name)) {
+		case ".m3u8":
+			contentType = "application/vnd.apple.mpegurl"
+		case ".m4s":
+			contentType = "video/iso.segment"
+		case ".mp4":
+			contentType = "video/mp4"
+		}
+
+		f, openErr := os.Open(localPath)
+		if openErr != nil {
+			return "", openErr
+		}
+		storeKey := baseKey + "/" + name
+		putErr := s.store.PutObject(ctx, storeKey, contentType, f, info.Size())
+		_ = f.Close()
+		if putErr != nil {
+			return "", putErr
+		}
+	}
+
+	return baseKey + "/master.m3u8", nil
 }

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 const EventTypeDeviceMessageCreated = "message.created"
@@ -15,7 +17,11 @@ const EventTypeMessageStatus = "message.status"
 
 const EventTypeMessageUpdated = "message.updated"
 
+const EventTypeMessageDeleted = "message.deleted"
+
 const EventTypeMessageReaction = "message.reaction"
+const EventTypePresence = "presence.update"
+const EventTypeNotification = "notification"
 
 type DeviceMessageCreatedEvent struct {
 	Type              string    `json:"type"`
@@ -59,6 +65,15 @@ type MessageUpdatedEvent struct {
 	EditedAt        time.Time `json:"edited_at"`
 }
 
+type MessageDeletedEvent struct {
+	Type            string    `json:"type"`
+	MessageID       string    `json:"message_id"`
+	ChatID          string    `json:"chat_id"`
+	ActorUserID     string    `json:"actor_user_id"`
+	RecipientUserID string    `json:"recipient_user_id"`
+	At              time.Time `json:"at"`
+}
+
 type MessageReaction struct {
 	Emoji   string   `json:"emoji"`
 	UserIDs []string `json:"user_ids"`
@@ -76,6 +91,22 @@ type MessageReactionEvent struct {
 	At              time.Time         `json:"at"`
 }
 
+type PresenceEvent struct {
+	Type      string    `json:"type"`
+	UserID    string    `json:"user_id"`
+	Online    bool      `json:"online"`
+	LastSeen  time.Time `json:"last_seen"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type NotificationEvent struct {
+	Type      string    `json:"type"`
+	UserID    string    `json:"user_id"`
+	Kind      string    `json:"kind"`
+	Payload   any       `json:"payload"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type EventPublisher struct {
 	c *Client
 }
@@ -84,12 +115,23 @@ func NewEventPublisher(c *Client) *EventPublisher {
 	return &EventPublisher{c: c}
 }
 
+func NewEventPublisherFromRedis(rdb *redis.Client) *EventPublisher {
+	if rdb == nil {
+		return &EventPublisher{}
+	}
+	return &EventPublisher{c: &Client{rdb: rdb}}
+}
+
 func deviceChannel(deviceID string) string {
 	return "device:" + deviceID
 }
 
 func userChannel(userID string) string {
 	return "user:" + userID
+}
+
+func presenceChannel(userID string) string {
+	return "presence:" + userID
 }
 
 func (p *EventPublisher) PublishDeviceMessageCreated(ctx context.Context, ev DeviceMessageCreatedEvent) error {
@@ -148,6 +190,20 @@ func (p *EventPublisher) PublishMessageUpdated(ctx context.Context, ev MessageUp
 	return p.c.Client().Publish(ctx, userChannel(ev.RecipientUserID), payload).Err()
 }
 
+func (p *EventPublisher) PublishMessageDeleted(ctx context.Context, ev MessageDeletedEvent) error {
+	if p == nil || p.c == nil {
+		return nil
+	}
+	if ev.Type == "" {
+		ev.Type = EventTypeMessageDeleted
+	}
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("marshal event: %w", err)
+	}
+	return p.c.Client().Publish(ctx, userChannel(ev.RecipientUserID), payload).Err()
+}
+
 func (p *EventPublisher) PublishMessageReaction(ctx context.Context, ev MessageReactionEvent) error {
 	if p == nil || p.c == nil {
 		return nil
@@ -160,4 +216,32 @@ func (p *EventPublisher) PublishMessageReaction(ctx context.Context, ev MessageR
 		return fmt.Errorf("marshal event: %w", err)
 	}
 	return p.c.Client().Publish(ctx, userChannel(ev.RecipientUserID), payload).Err()
+}
+
+func (p *EventPublisher) PublishPresence(ctx context.Context, ev PresenceEvent) error {
+	if p == nil || p.c == nil {
+		return nil
+	}
+	if ev.Type == "" {
+		ev.Type = EventTypePresence
+	}
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("marshal event: %w", err)
+	}
+	return p.c.Client().Publish(ctx, presenceChannel(ev.UserID), payload).Err()
+}
+
+func (p *EventPublisher) PublishNotification(ctx context.Context, ev NotificationEvent) error {
+	if p == nil || p.c == nil {
+		return nil
+	}
+	if ev.Type == "" {
+		ev.Type = EventTypeNotification
+	}
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("marshal event: %w", err)
+	}
+	return p.c.Client().Publish(ctx, userChannel(ev.UserID), payload).Err()
 }

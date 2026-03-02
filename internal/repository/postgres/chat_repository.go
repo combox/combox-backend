@@ -148,13 +148,14 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 		       c.chat_type,
 		       c.chat_kind,
 		       c.bot_id::text,
+		       peer.id::text,
 		       peer.avatar_data_url,
 		       peer.avatar_gradient,
 		       c.created_at
 		FROM chats c
 		INNER JOIN chat_members cm ON cm.chat_id = c.id
 		LEFT JOIN LATERAL (
-			SELECT u.username, u.first_name, u.last_name, u.avatar_data_url, u.avatar_gradient
+			SELECT u.id, u.username, u.first_name, u.last_name, u.avatar_data_url, u.avatar_gradient
 			FROM chat_members cm_peer
 			INNER JOIN users u ON u.id = cm_peer.user_id
 			WHERE cm_peer.chat_id = c.id
@@ -163,6 +164,7 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 			LIMIT 1
 		) peer ON c.is_direct = TRUE
 		WHERE cm.user_id = $1::uuid
+		  AND (c.is_direct = FALSE OR peer.id IS NOT NULL)
 		ORDER BY c.created_at DESC
 	`
 	rows, err := r.client.pool.Query(ctx, query, userID)
@@ -174,7 +176,7 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 	var out []chat.Chat
 	for rows.Next() {
 		var item chat.Chat
-		if err := rows.Scan(&item.ID, &item.Title, &item.IsDirect, &item.Type, &item.Kind, &item.BotID, &item.AvatarURL, &item.AvatarBg, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.IsDirect, &item.Type, &item.Kind, &item.BotID, &item.PeerUserID, &item.AvatarURL, &item.AvatarBg, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)

@@ -16,6 +16,7 @@ import (
 	emailcodesvc "combox-backend/internal/service/emailcode"
 	searchsvc "combox-backend/internal/service/search"
 
+	vkrepo "combox-backend/internal/repository/valkey"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -33,22 +34,27 @@ type ValkeyClient interface {
 }
 
 type RouterDeps struct {
-	Logger        *slog.Logger
-	Postgres      PostgresPinger
-	Valkey        ValkeyClient
-	ReadyTimeout  time.Duration
-	I18n          Translator
-	DefaultLocale string
-	AccessSecret  string
-	Auth          AuthService
-	EmailCode     EmailCodeService
-	Chat          ChatService
-	Search        SearchService
-	Media         MediaService
-	E2E           E2EService
-	BotAuth       BotAuthService
-	BotTokens     BotTokenService
-	BotWebhooks   BotWebhookService
+	Logger         *slog.Logger
+	Postgres       PostgresPinger
+	Valkey         ValkeyClient
+	ReadyTimeout   time.Duration
+	I18n           Translator
+	DefaultLocale  string
+	AccessSecret   string
+	Auth           AuthService
+	EmailCode      EmailCodeService
+	Chat           ChatService
+	Search         SearchService
+	GIF            GIFService
+	Media          MediaService
+	E2E            E2EService
+	BotAuth        BotAuthService
+	BotTokens      BotTokenService
+	BotWebhooks    BotWebhookService
+	PresenceRepo   *vkrepo.PresenceRepository
+	ProfileRepo    *vkrepo.ProfileSettingsRepository
+	EmailChange    *vkrepo.EmailChangeRepository
+	EmailChangeTTL time.Duration
 }
 
 type Translator interface {
@@ -73,18 +79,36 @@ func NewRouter(deps RouterDeps) http.Handler {
 		mux.HandleFunc("/api/private/v1/auth/login", newLoginHandler(deps.Auth, deps.EmailCode, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/auth/refresh", newRefreshHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/auth/logout", newLogoutHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/profile", newProfileHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/profile/email/change/start", newProfileEmailChangeStartHandler(deps.Auth, deps.EmailCode, deps.EmailChange, deps.EmailChangeTTL, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/profile/email/change/verify-old", newProfileEmailChangeVerifyOldHandler(deps.Auth, deps.EmailCode, deps.EmailChange, deps.EmailChangeTTL, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/profile/email/change/send-new", newProfileEmailChangeSendNewHandler(deps.Auth, deps.EmailCode, deps.EmailChange, deps.EmailChangeTTL, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/profile/email/change/confirm", newProfileEmailChangeConfirmHandler(deps.Auth, deps.EmailCode, deps.EmailChange, deps.EmailChangeTTL, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.Chat != nil {
 		mux.HandleFunc("/api/private/v1/chats", newChatsHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/chats/direct/messages", newDirectMessageHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/chats/", newChatMessagesHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/messages/", newMessagesByIDHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.Search != nil {
 		mux.HandleFunc("/api/private/v1/search", newSearchHandler(deps.Search, deps.I18n, deps.DefaultLocale))
 	}
+	if deps.GIF != nil {
+		mux.HandleFunc("/api/private/v1/gifs/search", newGifsSearchHandler(deps.GIF, deps.I18n, deps.DefaultLocale))
+		if deps.ProfileRepo != nil {
+			mux.HandleFunc("/api/private/v1/gifs/recent", newGifsRecentHandler(deps.ProfileRepo, deps.I18n, deps.DefaultLocale))
+		}
+	}
+	if deps.PresenceRepo != nil && deps.ProfileRepo != nil {
+		mux.HandleFunc("/api/private/v1/presence", newPresenceHandler(deps.PresenceRepo, deps.ProfileRepo, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/profile/settings", newProfileSettingsHandler(deps.ProfileRepo, deps.I18n, deps.DefaultLocale))
+	}
 	if deps.Media != nil {
 		mux.HandleFunc("/api/private/v1/media/attachments", newMediaAttachmentsHandler(deps.Media, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/media/attachments/", newMediaAttachmentByIDHandler(deps.Media, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/media/sessions", newMediaSessionsHandler(deps.Media, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/media/sessions/", newMediaSessionByIDHandler(deps.Media, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.BotTokens != nil {
 		mux.HandleFunc("/api/private/v1/bot/tokens", newPrivateBotTokensHandler(deps.BotTokens, deps.I18n, deps.DefaultLocale))
@@ -177,6 +201,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 		RequestIDMiddleware,
 		BotAuthMiddleware(deps.BotAuth, deps.I18n, deps.DefaultLocale),
 		AuthMiddleware(deps.AccessSecret, deps.I18n, deps.DefaultLocale),
+		PresenceHeartbeatMiddleware(deps.Valkey),
 		RecoverMiddleware(deps.Logger),
 		AccessLogMiddleware(deps.Logger),
 	)
@@ -188,10 +213,14 @@ type AuthService interface {
 	Login(ctx context.Context, input authsvc.LoginInput) (authsvc.User, authsvc.Tokens, error)
 	Refresh(ctx context.Context, input authsvc.RefreshInput) (authsvc.Tokens, error)
 	Logout(ctx context.Context, input authsvc.LogoutInput) error
+	GetProfile(ctx context.Context, userID string) (authsvc.User, error)
+	UpdateProfile(ctx context.Context, input authsvc.UpdateProfileInput) (authsvc.User, error)
+	UpdateEmail(ctx context.Context, userID, email string) (authsvc.User, error)
 }
 
 type EmailCodeService interface {
 	SendCode(ctx context.Context, email, locale string) error
+	SendCodeEmailOnly(ctx context.Context, email, locale string) error
 	VerifyCode(ctx context.Context, email, code string) (bool, error)
 	ConsumeVerified(ctx context.Context, email string) (bool, error)
 	IssueLoginKey(ctx context.Context, email string) (string, error)
@@ -207,6 +236,7 @@ type ChatService interface {
 	CreateChat(ctx context.Context, input chat.CreateChatInput) (chat.Chat, error)
 	ListChats(ctx context.Context, userID string) ([]chat.Chat, error)
 	CreateMessage(ctx context.Context, input chat.CreateMessageInput) (chat.Message, error)
+	CreateDirectMessage(ctx context.Context, input chat.CreateDirectMessageInput) (chat.Message, chat.Chat, error)
 	ListMessages(ctx context.Context, input chat.ListMessagesInput) (chat.MessagePage, error)
 	UpsertMessageStatus(ctx context.Context, input chat.UpsertMessageStatusInput) (chat.MessageStatus, error)
 	EditMessage(ctx context.Context, input chat.EditMessageInput) (chat.Message, error)

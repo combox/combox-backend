@@ -2,13 +2,18 @@ package http
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	vkrepo "combox-backend/internal/repository/valkey"
 
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
@@ -47,7 +52,6 @@ func newWSHandler(valkey wsRealtime, accessSecret string, i18n Translator, defau
 		if err != nil {
 			return
 		}
-		defer func() { _ = conn.Close() }()
 
 		channels := []string{"user:" + userID}
 		deviceID := strings.TrimSpace(r.URL.Query().Get("device_id"))
@@ -60,6 +64,38 @@ func newWSHandler(valkey wsRealtime, accessSecret string, i18n Translator, defau
 		defer func() { _ = pubsub.Close() }()
 		msgCh := pubsub.Channel(redis.WithChannelSize(256))
 
+		presenceRepo := vkrepo.NewPresenceRepositoryFromRedis(valkey.Client())
+		eventPublisher := vkrepo.NewEventPublisherFromRedis(valkey.Client())
+		connID := newPresenceConnID()
+		presenceConnsKey := "presence:conns:" + userID
+		_ = valkey.Client().SAdd(ctx, presenceConnsKey, connID).Err()
+		_ = valkey.Client().Expire(ctx, presenceConnsKey, 90*time.Second).Err()
+		now := time.Now().UTC()
+		_ = presenceRepo.SetOnline(ctx, userID, now, 90*time.Second)
+		_ = eventPublisher.PublishPresence(ctx, vkrepo.PresenceEvent{
+			UserID:    userID,
+			Online:    true,
+			LastSeen:  now,
+			UpdatedAt: now,
+		})
+		defer func() {
+			_ = conn.Close()
+			_ = valkey.Client().SRem(ctx, presenceConnsKey, connID).Err()
+			if cnt, err := valkey.Client().SCard(ctx, presenceConnsKey).Result(); err == nil && cnt == 0 {
+				offlineAt := time.Now().UTC()
+				_ = presenceRepo.SetOffline(ctx, userID, offlineAt, 30*24*time.Hour)
+				_ = eventPublisher.PublishPresence(ctx, vkrepo.PresenceEvent{
+					UserID:    userID,
+					Online:    false,
+					LastSeen:  offlineAt,
+					UpdatedAt: offlineAt,
+				})
+			}
+		}()
+
+		var subMu sync.Mutex
+		presenceSubs := map[string]struct{}{}
+
 		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		conn.SetPongHandler(func(string) error {
 			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -70,9 +106,56 @@ func newWSHandler(valkey wsRealtime, accessSecret string, i18n Translator, defau
 		go func() {
 			defer close(readDone)
 			for {
-				_, _, err := conn.ReadMessage()
+				_, body, err := conn.ReadMessage()
 				if err != nil {
 					return
+				}
+				var msg struct {
+					Type    string   `json:"type"`
+					UserIDs []string `json:"user_ids"`
+				}
+				if err := json.Unmarshal(body, &msg); err != nil {
+					continue
+				}
+				if strings.TrimSpace(msg.Type) == "presence.subscribe" {
+					ch := make([]string, 0, len(msg.UserIDs))
+					subMu.Lock()
+					for _, id := range msg.UserIDs {
+						id = strings.TrimSpace(id)
+						if id == "" {
+							continue
+						}
+						channel := "presence:" + id
+						if _, exists := presenceSubs[channel]; exists {
+							continue
+						}
+						presenceSubs[channel] = struct{}{}
+						ch = append(ch, channel)
+					}
+					subMu.Unlock()
+					if len(ch) > 0 {
+						_ = pubsub.Subscribe(ctx, ch...)
+					}
+				}
+				if strings.TrimSpace(msg.Type) == "presence.unsubscribe" {
+					ch := make([]string, 0, len(msg.UserIDs))
+					subMu.Lock()
+					for _, id := range msg.UserIDs {
+						id = strings.TrimSpace(id)
+						if id == "" {
+							continue
+						}
+						channel := "presence:" + id
+						if _, exists := presenceSubs[channel]; !exists {
+							continue
+						}
+						delete(presenceSubs, channel)
+						ch = append(ch, channel)
+					}
+					subMu.Unlock()
+					if len(ch) > 0 {
+						_ = pubsub.Unsubscribe(ctx, ch...)
+					}
 				}
 			}
 		}()
@@ -88,6 +171,15 @@ func newWSHandler(valkey wsRealtime, accessSecret string, i18n Translator, defau
 				return
 			case <-ping.C:
 				_ = conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second))
+				pingAt := time.Now().UTC()
+				_ = presenceRepo.SetOnline(ctx, userID, pingAt, 90*time.Second)
+				_ = valkey.Client().Expire(ctx, presenceConnsKey, 90*time.Second).Err()
+				_ = eventPublisher.PublishPresence(ctx, vkrepo.PresenceEvent{
+					UserID:    userID,
+					Online:    true,
+					LastSeen:  pingAt,
+					UpdatedAt: pingAt,
+				})
 			case msg, ok := <-msgCh:
 				if !ok {
 					return
@@ -139,4 +231,12 @@ func verifyAccessToken(token, secret string) (string, error) {
 		return "", errors.New("token expired")
 	}
 	return strings.TrimSpace(payload.Sub), nil
+}
+
+func newPresenceConnID() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("conn-%d", time.Now().UTC().UnixNano())
+	}
+	return fmt.Sprintf("%x", buf)
 }
