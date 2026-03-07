@@ -129,6 +129,22 @@ func (r *AuthUserRepository) UpdateSessionIdleTTL(ctx context.Context, userID st
 	return nil
 }
 
+func (r *AuthUserRepository) UpdatePasswordHash(ctx context.Context, userID, passwordHash string) error {
+	const query = `
+		UPDATE users
+		SET password_hash = $2, updated_at = NOW()
+		WHERE id = $1::uuid
+	`
+	tag, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(userID), strings.TrimSpace(passwordHash))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return authsvc.ErrUserNotFound
+	}
+	return nil
+}
+
 func (r *AuthUserRepository) UpdateProfile(ctx context.Context, input authsvc.UpdateProfileInput) (authsvc.User, error) {
 	setClauses := make([]string, 0, 6)
 	args := make([]any, 0, 8)

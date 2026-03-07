@@ -60,6 +60,11 @@ type completeSessionRequest struct {
 	Parts []mediasvc.CompletePart `json:"parts"`
 }
 
+type importAttachmentURLRequest struct {
+	SourceURL string `json:"source_url"`
+	Filename  string `json:"filename"`
+}
+
 func attachmentIDFromPath(path string) (string, bool) {
 	path = strings.TrimSpace(path)
 	const prefix = "/api/private/v1/media/attachments/"
@@ -230,6 +235,34 @@ func newMediaAttachmentByIDHandler(svc MediaService, i18n Translator, defaultLoc
 		userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
 		if userID == "" {
 			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.auth.missing_user_context", nil, i18n, defaultLocale)
+			return
+		}
+		if strings.TrimSpace(r.URL.Path) == "/api/private/v1/media/attachments/import-url" {
+			if r.Method != http.MethodPost {
+				writeMethodNotAllowed(w, r, i18n, defaultLocale)
+				return
+			}
+			var req importAttachmentURLRequest
+			if err := decodeJSON(r, &req); err != nil {
+				writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+				return
+			}
+			out, err := svc.ImportFromURL(r.Context(), mediasvc.ImportFromURLInput{
+				UserID:    userID,
+				SourceURL: req.SourceURL,
+				Filename:  req.Filename,
+			})
+			if err != nil {
+				writeMediaServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+			locale := requestLocale(r, defaultLocale)
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"message":     i18n.Translate(locale, "media.attachment.create.success"),
+				"attachment":  out.Attachment,
+				"url":         out.URL,
+				"preview_url": out.PreviewURL,
+			})
 			return
 		}
 
@@ -451,6 +484,7 @@ func newMediaSessionByIDHandler(svc MediaService, i18n Translator, defaultLocale
 
 type MediaService interface {
 	CreateAttachment(ctx context.Context, input mediasvc.CreateAttachmentInput) (mediasvc.CreateAttachmentOutput, error)
+	ImportFromURL(ctx context.Context, input mediasvc.ImportFromURLInput) (mediasvc.GetAttachmentOutput, error)
 	PresignPart(ctx context.Context, requesterUserID, attachmentID, uploadID string, partNumber int) (mediasvc.PartURLOutput, error)
 	CompleteMultipart(ctx context.Context, requesterUserID, attachmentID, uploadID string, parts []mediasvc.CompletePart) (mediasvc.Attachment, error)
 	GetAttachment(ctx context.Context, requesterUserID, attachmentID string) (mediasvc.GetAttachmentOutput, error)

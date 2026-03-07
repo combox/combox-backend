@@ -15,6 +15,25 @@ type createChatRequest struct {
 	Type      string   `json:"type"`
 }
 
+type createChannelRequest struct {
+	Title       string `json:"title"`
+	ChannelType string `json:"channel_type"`
+}
+
+type updateChatRequest struct {
+	Title          *string `json:"title"`
+	AvatarDataURL  *string `json:"avatar_data_url"`
+	AvatarGradient *string `json:"avatar_gradient"`
+}
+
+type addMembersRequest struct {
+	MemberIDs []string `json:"member_ids"`
+}
+
+type updateMemberRoleRequest struct {
+	Role string `json:"role"`
+}
+
 func messageEditFromPath(path string) (string, string, bool) {
 	path = strings.TrimSpace(path)
 	const prefix = "/api/private/v1/chats/"
@@ -33,18 +52,139 @@ func messageEditFromPath(path string) (string, string, bool) {
 }
 
 type createMessageRequest struct {
-	Content       string   `json:"content"`
-	AttachmentIDs []string `json:"attachment_ids"`
-	E2E           *struct {
+	Content          string   `json:"content"`
+	ReplyToMessageID string   `json:"reply_to_message_id"`
+	AttachmentIDs    []string `json:"attachment_ids"`
+	E2E              *struct {
 		SenderDeviceID string                `json:"sender_device_id"`
 		Envelopes      []chatsvc.E2EEnvelope `json:"envelopes"`
 	} `json:"e2e"`
 }
 
 type createDirectMessageRequest struct {
-	RecipientUserID string   `json:"recipient_user_id"`
-	Content         string   `json:"content"`
-	AttachmentIDs   []string `json:"attachment_ids"`
+	RecipientUserID  string   `json:"recipient_user_id"`
+	Content          string   `json:"content"`
+	ReplyToMessageID string   `json:"reply_to_message_id"`
+	AttachmentIDs    []string `json:"attachment_ids"`
+}
+
+func channelsFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/chats/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 2 {
+		return "", false
+	}
+	if parts[0] == "" || parts[1] != "channels" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+func channelFromPath(path string) (string, string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/chats/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 3 {
+		return "", "", false
+	}
+	if parts[0] == "" || parts[1] != "channels" || parts[2] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[2], true
+}
+
+func membersFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/chats/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 2 {
+		return "", false
+	}
+	if parts[0] == "" || parts[1] != "members" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+func chatIDOnlyFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/chats/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 1 {
+		return "", false
+	}
+	if parts[0] == "" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+func inviteAcceptFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/chats/invites/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 2 {
+		return "", false
+	}
+	if parts[0] == "" || parts[1] != "accept" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+func leaveFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/chats/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 2 {
+		return "", false
+	}
+	if parts[0] == "" || parts[1] != "leave" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+func memberByUserFromPath(path string) (string, string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/chats/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 3 {
+		return "", "", false
+	}
+	if parts[0] == "" || parts[1] != "members" || parts[2] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[2], true
 }
 
 type upsertMessageStatusRequest struct {
@@ -272,11 +412,16 @@ func newDirectMessageHandler(chat ChatService, i18n Translator, defaultLocale st
 			writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
 			return
 		}
+		if strings.TrimSpace(req.RecipientUserID) == userID {
+			writeAPIError(w, r, http.StatusBadRequest, "invalid_argument", "error.message.invalid_input", nil, i18n, defaultLocale)
+			return
+		}
 		created, createdChat, err := chat.CreateDirectMessage(r.Context(), chatsvc.CreateDirectMessageInput{
-			UserID:          userID,
-			RecipientUserID: req.RecipientUserID,
-			Content:         req.Content,
-			AttachmentIDs:   req.AttachmentIDs,
+			UserID:           userID,
+			RecipientUserID:  req.RecipientUserID,
+			Content:          req.Content,
+			ReplyToMessageID: req.ReplyToMessageID,
+			AttachmentIDs:    req.AttachmentIDs,
 		})
 		if err != nil {
 			writeChatServiceError(w, r, err, i18n, defaultLocale)
@@ -297,6 +442,196 @@ func newChatMessagesHandler(chat ChatService, i18n Translator, defaultLocale str
 		userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
 		if userID == "" {
 			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.auth.missing_user_context", nil, i18n, defaultLocale)
+			return
+		}
+
+		if groupChatID, ok := channelsFromPath(r.URL.Path); ok {
+			switch r.Method {
+			case http.MethodGet:
+				items, err := chat.ListChannels(r.Context(), userID, groupChatID)
+				if err != nil {
+					writeChatServiceError(w, r, err, i18n, defaultLocale)
+					return
+				}
+				locale := requestLocale(r, defaultLocale)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"message": i18n.Translate(locale, "status.ok"),
+					"items":   items,
+				})
+			case http.MethodPost:
+				var req createChannelRequest
+				if err := decodeJSON(r, &req); err != nil {
+					writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+					return
+				}
+				created, err := chat.CreateChannel(r.Context(), chatsvc.CreateChannelInput{
+					UserID:      userID,
+					GroupChatID: groupChatID,
+					Title:       req.Title,
+					ChannelType: req.ChannelType,
+				})
+				if err != nil {
+					writeChatServiceError(w, r, err, i18n, defaultLocale)
+					return
+				}
+				locale := requestLocale(r, defaultLocale)
+				writeJSON(w, http.StatusCreated, map[string]any{
+					"message": i18n.Translate(locale, "status.ok"),
+					"chat":    created,
+				})
+			default:
+				writeMethodNotAllowed(w, r, i18n, defaultLocale)
+			}
+			return
+		}
+
+		if groupChatID, channelChatID, ok := channelFromPath(r.URL.Path); ok {
+			if r.Method != http.MethodDelete {
+				writeMethodNotAllowed(w, r, i18n, defaultLocale)
+				return
+			}
+			err := chat.DeleteChannel(r.Context(), chatsvc.DeleteChannelInput{UserID: userID, GroupChatID: groupChatID, ChannelChatID: channelChatID})
+			if err != nil {
+				writeChatServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+			locale := requestLocale(r, defaultLocale)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"message": i18n.Translate(locale, "status.ok"),
+			})
+			return
+		}
+
+		if targetChatID, ok := chatIDOnlyFromPath(r.URL.Path); ok {
+			if r.Method != http.MethodPatch {
+				writeMethodNotAllowed(w, r, i18n, defaultLocale)
+				return
+			}
+			var req updateChatRequest
+			if err := decodeJSON(r, &req); err != nil {
+				writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+				return
+			}
+			updated, err := chat.UpdateChat(r.Context(), chatsvc.UpdateChatInput{
+				UserID:         userID,
+				ChatID:         targetChatID,
+				Title:          chatsvc.OptionalString{Set: req.Title != nil, Value: req.Title},
+				AvatarDataURL:  chatsvc.OptionalString{Set: req.AvatarDataURL != nil, Value: req.AvatarDataURL},
+				AvatarGradient: chatsvc.OptionalString{Set: req.AvatarGradient != nil, Value: req.AvatarGradient},
+			})
+			if err != nil {
+				writeChatServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+			locale := requestLocale(r, defaultLocale)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"message": i18n.Translate(locale, "status.ok"),
+				"chat":    updated,
+			})
+			return
+		}
+
+		if inviteToken, ok := inviteAcceptFromPath(r.URL.Path); ok {
+			if r.Method != http.MethodPost {
+				writeMethodNotAllowed(w, r, i18n, defaultLocale)
+				return
+			}
+			accepted, err := chat.AcceptInvite(r.Context(), userID, inviteToken)
+			if err != nil {
+				writeChatServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+			locale := requestLocale(r, defaultLocale)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"message": i18n.Translate(locale, "status.ok"),
+				"chat":    accepted,
+			})
+			return
+		}
+
+		if targetChatID, ok := leaveFromPath(r.URL.Path); ok {
+			if r.Method != http.MethodPost {
+				writeMethodNotAllowed(w, r, i18n, defaultLocale)
+				return
+			}
+			if err := chat.LeaveChat(r.Context(), userID, targetChatID); err != nil {
+				writeChatServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+			locale := requestLocale(r, defaultLocale)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"message": i18n.Translate(locale, "status.ok"),
+			})
+			return
+		}
+
+		if targetChatID, ok := membersFromPath(r.URL.Path); ok {
+			switch r.Method {
+			case http.MethodGet:
+				items, err := chat.ListMembers(r.Context(), userID, targetChatID)
+				if err != nil {
+					writeChatServiceError(w, r, err, i18n, defaultLocale)
+					return
+				}
+				locale := requestLocale(r, defaultLocale)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"message": i18n.Translate(locale, "status.ok"),
+					"items":   items,
+				})
+			case http.MethodPost:
+				var req addMembersRequest
+				if err := decodeJSON(r, &req); err != nil {
+					writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+					return
+				}
+				items, err := chat.AddMembers(r.Context(), userID, targetChatID, req.MemberIDs)
+				if err != nil {
+					writeChatServiceError(w, r, err, i18n, defaultLocale)
+					return
+				}
+				locale := requestLocale(r, defaultLocale)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"message": i18n.Translate(locale, "status.ok"),
+					"items":   items,
+				})
+			default:
+				writeMethodNotAllowed(w, r, i18n, defaultLocale)
+			}
+			return
+		}
+
+		if targetChatID, targetUserID, ok := memberByUserFromPath(r.URL.Path); ok {
+			switch r.Method {
+			case http.MethodPatch:
+				var req updateMemberRoleRequest
+				if err := decodeJSON(r, &req); err != nil {
+					writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+					return
+				}
+				items, err := chat.UpdateMemberRole(r.Context(), userID, targetChatID, targetUserID, req.Role)
+				if err != nil {
+					writeChatServiceError(w, r, err, i18n, defaultLocale)
+					return
+				}
+				locale := requestLocale(r, defaultLocale)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"message": i18n.Translate(locale, "status.ok"),
+					"items":   items,
+				})
+			case http.MethodDelete:
+				items, err := chat.RemoveMember(r.Context(), userID, targetChatID, targetUserID)
+				if err != nil {
+					writeChatServiceError(w, r, err, i18n, defaultLocale)
+					return
+				}
+				locale := requestLocale(r, defaultLocale)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"message": i18n.Translate(locale, "status.ok"),
+					"items":   items,
+				})
+			default:
+				writeMethodNotAllowed(w, r, i18n, defaultLocale)
+			}
 			return
 		}
 
@@ -422,10 +757,11 @@ func newChatMessagesHandler(chat ChatService, i18n Translator, defaultLocale str
 				return
 			}
 			input := chatsvc.CreateMessageInput{
-				UserID:        userID,
-				ChatID:        chatID,
-				Content:       req.Content,
-				AttachmentIDs: req.AttachmentIDs,
+				UserID:           userID,
+				ChatID:           chatID,
+				Content:          req.Content,
+				ReplyToMessageID: req.ReplyToMessageID,
+				AttachmentIDs:    req.AttachmentIDs,
 			}
 			if req.E2E != nil {
 				input.SenderDeviceID = req.E2E.SenderDeviceID

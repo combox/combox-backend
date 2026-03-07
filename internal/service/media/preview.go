@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
@@ -44,6 +45,13 @@ func (s *Service) processPreviewAsync(ctx context.Context, a Attachment) {
 		_ = s.repo.FinalizeSessionByAttachment(ctx, a.ID, "failed", nil, &errorCode, &msg, now)
 	}
 
+	// Try to fill width/height/duration_ms so clients can layout media without jumps.
+	if a.Width == nil || a.Height == nil || a.DurationMS == nil {
+		if w, h, d := s.probeMeta(ctx, a); w != nil || h != nil || d != nil {
+			_ = s.repo.SetAttachmentMeta(ctx, a.ID, w, h, d)
+		}
+	}
+
 	previewBytes, err := s.buildPreview(ctx, a)
 	if err != nil {
 		fail(err)
@@ -79,6 +87,133 @@ func (s *Service) processPreviewAsync(ctx context.Context, a Attachment) {
 	now := time.Now().UTC()
 	_ = s.repo.SetProcessing(ctx, a.ID, "ready", nil, previewKey, hlsMasterKey, &now)
 	_ = s.repo.FinalizeSessionByAttachment(ctx, a.ID, "ready", hlsMasterKey, nil, nil, now)
+}
+
+func (s *Service) probeMeta(ctx context.Context, a Attachment) (*int, *int, *int) {
+	kind := strings.ToLower(strings.TrimSpace(a.Kind))
+	switch kind {
+	case "image":
+		w, h, err := s.probeImageMeta(ctx, a.ObjectKey)
+		if err != nil {
+			return nil, nil, nil
+		}
+		return &w, &h, nil
+	case "video", "audio":
+		w, h, d, err := s.probeFFProbeMeta(ctx, a.ObjectKey)
+		if err != nil {
+			return nil, nil, nil
+		}
+		var wPtr *int
+		var hPtr *int
+		var dPtr *int
+		if w > 0 {
+			wPtr = &w
+		}
+		if h > 0 {
+			hPtr = &h
+		}
+		if d > 0 {
+			dPtr = &d
+		}
+		return wPtr, hPtr, dPtr
+	default:
+		return nil, nil, nil
+	}
+}
+
+func (s *Service) probeImageMeta(ctx context.Context, objectKey string) (int, int, error) {
+	rc, err := s.store.GetObject(ctx, objectKey)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rc.Close()
+	raw, err := io.ReadAll(io.LimitReader(rc, 32<<20))
+	if err != nil {
+		return 0, 0, err
+	}
+	img, err := decodeImage(raw)
+	if err != nil {
+		return 0, 0, err
+	}
+	b := img.Bounds()
+	return b.Dx(), b.Dy(), nil
+}
+
+type ffprobeOutput struct {
+	Streams []struct {
+		Width  int    `json:"width"`
+		Height int    `json:"height"`
+		Codec  string `json:"codec_type"`
+		Dur    string `json:"duration"`
+	} `json:"streams"`
+	Format struct {
+		Dur string `json:"duration"`
+	} `json:"format"`
+}
+
+func (s *Service) probeFFProbeMeta(ctx context.Context, objectKey string) (int, int, int, error) {
+	ffprobePath, err := exec.LookPath("ffprobe")
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("ffprobe not found")
+	}
+
+	inputPath, cleanupIn, err := s.downloadToTempFile(ctx, objectKey)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer cleanupIn()
+
+	cmd := exec.CommandContext(
+		ctx,
+		ffprobePath,
+		"-v", "error",
+		"-show_streams",
+		"-show_format",
+		"-print_format", "json",
+		inputPath,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	var parsed ffprobeOutput
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return 0, 0, 0, err
+	}
+
+	width := 0
+	height := 0
+	for _, s := range parsed.Streams {
+		if strings.ToLower(strings.TrimSpace(s.Codec)) == "video" {
+			if s.Width > 0 {
+				width = s.Width
+			}
+			if s.Height > 0 {
+				height = s.Height
+			}
+			break
+		}
+	}
+
+	durationMS := 0
+	dur := strings.TrimSpace(parsed.Format.Dur)
+	if dur == "" {
+		for _, s := range parsed.Streams {
+			if strings.TrimSpace(s.Dur) != "" {
+				dur = strings.TrimSpace(s.Dur)
+				break
+			}
+		}
+	}
+	if dur != "" {
+		if seconds, err := strconv.ParseFloat(dur, 64); err == nil {
+			if seconds > 0 {
+				durationMS = int(seconds * 1000)
+			}
+		}
+	}
+
+	return width, height, durationMS, nil
 }
 
 func (s *Service) buildPreview(ctx context.Context, a Attachment) ([]byte, error) {

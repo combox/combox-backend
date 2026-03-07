@@ -33,6 +33,15 @@ func newSearchHandler(svc SearchService, i18n Translator, defaultLocale string) 
 			writeAPIError(w, r, http.StatusInternalServerError, "internal", "error.internal", nil, i18n, defaultLocale)
 			return
 		}
+		// Never return the requesting user in directory people results.
+		filteredUsers := items.Users[:0]
+		for _, user := range items.Users {
+			if strings.TrimSpace(user.ID) == userID {
+				continue
+			}
+			filteredUsers = append(filteredUsers, user)
+		}
+		items.Users = filteredUsers
 
 		locale := requestLocale(r, defaultLocale)
 		writeJSON(w, http.StatusOK, map[string]any{

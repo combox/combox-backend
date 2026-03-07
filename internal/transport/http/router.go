@@ -17,6 +17,7 @@ import (
 	searchsvc "combox-backend/internal/service/search"
 
 	vkrepo "combox-backend/internal/repository/valkey"
+
 	"github.com/redis/go-redis/v9"
 )
 
@@ -80,6 +81,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 		mux.HandleFunc("/api/private/v1/auth/refresh", newRefreshHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/auth/logout", newLogoutHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/profile", newProfileHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/profile/password", newProfilePasswordHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/users/", newUserByIDHandler(deps.Auth, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/profile/email/change/start", newProfileEmailChangeStartHandler(deps.Auth, deps.EmailCode, deps.EmailChange, deps.EmailChangeTTL, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/profile/email/change/verify-old", newProfileEmailChangeVerifyOldHandler(deps.Auth, deps.EmailCode, deps.EmailChange, deps.EmailChangeTTL, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/profile/email/change/send-new", newProfileEmailChangeSendNewHandler(deps.Auth, deps.EmailCode, deps.EmailChange, deps.EmailChangeTTL, deps.I18n, deps.DefaultLocale))
@@ -121,7 +124,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 		}
 	}
 	if deps.Valkey != nil {
-		mux.HandleFunc("/api/private/v1/ws", newWSHandler(deps.Valkey, deps.AccessSecret, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/ws", newWSHandler(deps.Valkey, wsDeps{ChatService: deps.Chat, SearchService: deps.Search}, deps.AccessSecret, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.E2E != nil {
 		mux.HandleFunc("/api/private/v1/e2e/devices/", newE2EDeviceKeysHandler(deps.E2E, deps.I18n, deps.DefaultLocale))
@@ -215,6 +218,8 @@ type AuthService interface {
 	Logout(ctx context.Context, input authsvc.LogoutInput) error
 	GetProfile(ctx context.Context, userID string) (authsvc.User, error)
 	UpdateProfile(ctx context.Context, input authsvc.UpdateProfileInput) (authsvc.User, error)
+	UpdateSessionIdleTTL(ctx context.Context, userID string, sessionIdleTTLSeconds *int64) (authsvc.User, error)
+	ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error
 	UpdateEmail(ctx context.Context, userID, email string) (authsvc.User, error)
 }
 
@@ -234,6 +239,16 @@ type SearchService interface {
 
 type ChatService interface {
 	CreateChat(ctx context.Context, input chat.CreateChatInput) (chat.Chat, error)
+	CreateChannel(ctx context.Context, input chat.CreateChannelInput) (chat.Chat, error)
+	DeleteChannel(ctx context.Context, input chat.DeleteChannelInput) error
+	UpdateChat(ctx context.Context, input chat.UpdateChatInput) (chat.Chat, error)
+	ListChannels(ctx context.Context, userID, groupChatID string) ([]chat.Chat, error)
+	ListMembers(ctx context.Context, userID, chatID string) ([]chat.ChatMember, error)
+	AddMembers(ctx context.Context, userID, chatID string, memberIDs []string) ([]chat.ChatMember, error)
+	UpdateMemberRole(ctx context.Context, actorUserID, chatID, targetUserID, role string) ([]chat.ChatMember, error)
+	RemoveMember(ctx context.Context, actorUserID, chatID, targetUserID string) ([]chat.ChatMember, error)
+	AcceptInvite(ctx context.Context, userID, token string) (chat.Chat, error)
+	LeaveChat(ctx context.Context, userID, chatID string) error
 	ListChats(ctx context.Context, userID string) ([]chat.Chat, error)
 	CreateMessage(ctx context.Context, input chat.CreateMessageInput) (chat.Message, error)
 	CreateDirectMessage(ctx context.Context, input chat.CreateDirectMessageInput) (chat.Message, chat.Chat, error)

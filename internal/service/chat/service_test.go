@@ -11,10 +11,11 @@ import (
 type memChatRepo struct {
 	chats    []Chat
 	members  map[string]map[string]bool
+	roles    map[string]map[string]string
 	failList bool
 }
 
-func (m *memChatRepo) CreateChat(_ context.Context, title string, memberIDs []string, _ string, chatType string) (Chat, error) {
+func (m *memChatRepo) CreateChat(_ context.Context, title string, memberIDs []string, creatorID string, chatType string) (Chat, error) {
 	if strings.TrimSpace(chatType) == "" {
 		chatType = ChatTypeStandard
 	}
@@ -36,9 +37,82 @@ func (m *memChatRepo) CreateChat(_ context.Context, title string, memberIDs []st
 	if m.members == nil {
 		m.members = map[string]map[string]bool{}
 	}
+	if m.roles == nil {
+		m.roles = map[string]map[string]string{}
+	}
 	m.members[created.ID] = map[string]bool{}
+	m.roles[created.ID] = map[string]string{}
 	for _, memberID := range memberIDs {
 		m.members[created.ID][memberID] = true
+		if !isDirect && memberID == creatorID {
+			m.roles[created.ID][memberID] = "owner"
+		} else {
+			m.roles[created.ID][memberID] = "member"
+		}
+	}
+	return created, nil
+}
+
+func (m *memChatRepo) DeleteChannel(_ context.Context, parentChatID, channelChatID string) error {
+	parentChatID = strings.TrimSpace(parentChatID)
+	channelChatID = strings.TrimSpace(channelChatID)
+	if parentChatID == "" || channelChatID == "" {
+		return ErrChatNotFound
+	}
+	idx := -1
+	for i := range m.chats {
+		if m.chats[i].ID == channelChatID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return ErrChatNotFound
+	}
+	chatRef := m.chats[idx]
+	if chatRef.Kind != "channel" || chatRef.ParentChatID == nil || *chatRef.ParentChatID != parentChatID {
+		return ErrChatNotFound
+	}
+	if chatRef.TopicNumber != nil && *chatRef.TopicNumber < 2 {
+		return ErrChatNotFound
+	}
+	copy(m.chats[idx:], m.chats[idx+1:])
+	m.chats = m.chats[:len(m.chats)-1]
+	if m.members != nil {
+		delete(m.members, channelChatID)
+	}
+	if m.roles != nil {
+		delete(m.roles, channelChatID)
+	}
+	return nil
+}
+
+func (m *memChatRepo) CreateChannel(_ context.Context, parentChatID, title, channelType, _ string) (Chat, error) {
+	if _, ok := m.members[parentChatID]; !ok {
+		return Chat{}, ErrChatNotFound
+	}
+	if m.roles == nil {
+		m.roles = map[string]map[string]string{}
+	}
+	created := Chat{
+		ID:           "channel-1",
+		Title:        title,
+		IsDirect:     false,
+		Type:         ChatTypeStandard,
+		Kind:         "channel",
+		ParentChatID: &parentChatID,
+		ChannelType:  &channelType,
+		CreatedAt:    time.Now().UTC(),
+	}
+	m.chats = append(m.chats, created)
+	m.members[created.ID] = map[string]bool{}
+	m.roles[created.ID] = map[string]string{}
+	for userID, isMember := range m.members[parentChatID] {
+		if !isMember {
+			continue
+		}
+		m.members[created.ID][userID] = true
+		m.roles[created.ID][userID] = m.roles[parentChatID][userID]
 	}
 	return created, nil
 }
@@ -69,11 +143,43 @@ func (m *memChatRepo) ListChatsByUser(_ context.Context, userID string) ([]Chat,
 	return out, nil
 }
 
+func (m *memChatRepo) ListChannelsByParent(_ context.Context, parentChatID, userID string) ([]Chat, error) {
+	out := make([]Chat, 0)
+	for _, c := range m.chats {
+		if c.Kind != "channel" || c.ParentChatID == nil || *c.ParentChatID != parentChatID {
+			continue
+		}
+		if m.members[c.ID][userID] {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
 func (m *memChatRepo) GetChat(_ context.Context, chatID string) (Chat, error) {
 	for _, c := range m.chats {
 		if c.ID == chatID {
 			return c, nil
 		}
+	}
+	return Chat{}, ErrChatNotFound
+}
+
+func (m *memChatRepo) UpdateChat(_ context.Context, input UpdateChatInput) (Chat, error) {
+	for i := range m.chats {
+		if m.chats[i].ID != input.ChatID {
+			continue
+		}
+		if input.Title.Set && input.Title.Value != nil {
+			m.chats[i].Title = strings.TrimSpace(*input.Title.Value)
+		}
+		if input.AvatarDataURL.Set {
+			m.chats[i].AvatarURL = input.AvatarDataURL.Value
+		}
+		if input.AvatarGradient.Set {
+			m.chats[i].AvatarBg = input.AvatarGradient.Value
+		}
+		return m.chats[i], nil
 	}
 	return Chat{}, ErrChatNotFound
 }
@@ -90,6 +196,68 @@ func (m *memChatRepo) ListChatMemberIDs(_ context.Context, chatID string) ([]str
 	return out, nil
 }
 
+func (m *memChatRepo) ListChatMembers(_ context.Context, chatID string) ([]ChatMember, error) {
+	set, ok := m.members[chatID]
+	if !ok {
+		return nil, ErrChatNotFound
+	}
+	out := make([]ChatMember, 0, len(set))
+	for userID, isMember := range set {
+		if !isMember {
+			continue
+		}
+		out = append(out, ChatMember{
+			UserID: userID,
+			Role:   m.roles[chatID][userID],
+		})
+	}
+	return out, nil
+}
+
+func (m *memChatRepo) AddChatMembers(_ context.Context, chatID string, memberIDs []string) error {
+	if _, ok := m.members[chatID]; !ok {
+		return ErrChatNotFound
+	}
+	for _, memberID := range memberIDs {
+		if strings.TrimSpace(memberID) == "" {
+			continue
+		}
+		m.members[chatID][memberID] = true
+		if m.roles[chatID] == nil {
+			m.roles[chatID] = map[string]string{}
+		}
+		if strings.TrimSpace(m.roles[chatID][memberID]) == "" {
+			m.roles[chatID][memberID] = "member"
+		}
+	}
+	return nil
+}
+
+func (m *memChatRepo) UpdateChatMemberRole(_ context.Context, chatID, userID, role string) error {
+	if _, ok := m.members[chatID]; !ok {
+		return ErrChatNotFound
+	}
+	if !m.members[chatID][userID] {
+		return ErrChatNotFound
+	}
+	if m.roles[chatID] == nil {
+		m.roles[chatID] = map[string]string{}
+	}
+	m.roles[chatID][userID] = role
+	return nil
+}
+
+func (m *memChatRepo) RemoveChatMember(_ context.Context, chatID, userID string) error {
+	if _, ok := m.members[chatID]; !ok {
+		return ErrChatNotFound
+	}
+	delete(m.members[chatID], userID)
+	if m.roles[chatID] != nil {
+		delete(m.roles[chatID], userID)
+	}
+	return nil
+}
+
 func (m *memChatRepo) IsChatMember(_ context.Context, chatID, userID string) (bool, error) {
 	if _, ok := m.members[chatID]; !ok {
 		return false, nil
@@ -97,11 +265,18 @@ func (m *memChatRepo) IsChatMember(_ context.Context, chatID, userID string) (bo
 	return m.members[chatID][userID], nil
 }
 
+func (m *memChatRepo) GetChatMemberRole(_ context.Context, chatID, userID string) (string, error) {
+	if m.roles == nil {
+		return "", nil
+	}
+	return m.roles[chatID][userID], nil
+}
+
 type memMsgRepo struct {
 	items []Message
 }
 
-func (m *memMsgRepo) CreateMessage(_ context.Context, chatID, userID, content string) (Message, error) {
+func (m *memMsgRepo) CreateMessage(_ context.Context, chatID, userID, content, _ string) (Message, error) {
 	msg := Message{
 		ID:        "msg-1",
 		ChatID:    chatID,
@@ -114,7 +289,7 @@ func (m *memMsgRepo) CreateMessage(_ context.Context, chatID, userID, content st
 	return msg, nil
 }
 
-func (m *memMsgRepo) CreateMessageAsBot(_ context.Context, chatID, botID, content string) (Message, error) {
+func (m *memMsgRepo) CreateMessageAsBot(_ context.Context, chatID, botID, content, _ string) (Message, error) {
 	msg := Message{
 		ID:          "msg-bot-1",
 		ChatID:      chatID,
@@ -128,11 +303,11 @@ func (m *memMsgRepo) CreateMessageAsBot(_ context.Context, chatID, botID, conten
 	return msg, nil
 }
 
-func (m *memMsgRepo) CreateMessageWithAttachments(ctx context.Context, chatID, userID, content string, _ []string) (Message, error) {
-	return m.CreateMessage(ctx, chatID, userID, content)
+func (m *memMsgRepo) CreateMessageWithAttachments(ctx context.Context, chatID, userID, content, replyToMessageID string, _ []string) (Message, error) {
+	return m.CreateMessage(ctx, chatID, userID, content, replyToMessageID)
 }
 
-func (m *memMsgRepo) CreateMessageE2E(_ context.Context, chatID, userID, senderDeviceID string, envelopes []E2EEnvelope) (Message, error) {
+func (m *memMsgRepo) CreateMessageE2E(_ context.Context, chatID, userID, senderDeviceID string, envelopes []E2EEnvelope, _ string) (Message, error) {
 	msg := Message{
 		ID:        "msg-1",
 		ChatID:    chatID,
@@ -148,13 +323,13 @@ func (m *memMsgRepo) CreateMessageE2E(_ context.Context, chatID, userID, senderD
 	return msg, nil
 }
 
-func (m *memMsgRepo) CreateMessageE2EWithAttachments(ctx context.Context, chatID, userID, senderDeviceID string, envelopes []E2EEnvelope, _ []string) (Message, error) {
-	return m.CreateMessageE2E(ctx, chatID, userID, senderDeviceID, envelopes)
+func (m *memMsgRepo) CreateMessageE2EWithAttachments(ctx context.Context, chatID, userID, senderDeviceID string, envelopes []E2EEnvelope, replyToMessageID string, _ []string) (Message, error) {
+	return m.CreateMessageE2E(ctx, chatID, userID, senderDeviceID, envelopes, replyToMessageID)
 }
 
 func (m *memMsgRepo) CreateForwardedMessage(ctx context.Context, chatID, sourceMessageID, userID string) (Message, error) {
 	// For tests we only need to satisfy the interface.
-	return m.CreateMessage(ctx, chatID, userID, "forward")
+	return m.CreateMessage(ctx, chatID, userID, "forward", "")
 }
 
 func (m *memMsgRepo) ListMessages(_ context.Context, chatID string, _ int, _ string) (MessagePage, error) {

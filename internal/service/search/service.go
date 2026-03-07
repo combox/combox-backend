@@ -18,6 +18,7 @@ type UserResult struct {
 	Username      string  `json:"username"`
 	FirstName     string  `json:"first_name"`
 	LastName      *string `json:"last_name,omitempty"`
+	BirthDate     *string `json:"birth_date,omitempty"`
 	AvatarDataURL *string `json:"avatar_data_url,omitempty"`
 	AvatarGradient *string `json:"avatar_gradient,omitempty"`
 }

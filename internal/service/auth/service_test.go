@@ -130,6 +130,21 @@ func (m *memUserRepo) UpdateEmail(_ context.Context, userID, email string) (User
 	return user, nil
 }
 
+func (m *memUserRepo) UpdatePasswordHash(_ context.Context, userID, passwordHash string) error {
+	if m.usersByID == nil {
+		return ErrUserNotFound
+	}
+	user, ok := m.usersByID[userID]
+	if !ok {
+		return ErrUserNotFound
+	}
+	user.PasswordHash = passwordHash
+	m.usersByID[userID] = user
+	m.usersByLogin[user.Email] = user
+	m.usersByLogin[user.Username] = user
+	return nil
+}
+
 type memSessionRepo struct {
 	sessions map[string]Session
 }

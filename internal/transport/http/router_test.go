@@ -468,6 +468,62 @@ func (stubChatService) CreateChat(context.Context, chatsvc.CreateChatInput) (cha
 	return chatsvc.Chat{ID: "chat-1", Title: "General", Type: "standard", Kind: "group"}, nil
 }
 
+func (stubChatService) CreateChannel(context.Context, chatsvc.CreateChannelInput) (chatsvc.Chat, error) {
+	return chatsvc.Chat{ID: "channel-1", Title: "General", Type: "standard", Kind: "channel"}, nil
+}
+
+func (stubChatService) DeleteChannel(context.Context, chatsvc.DeleteChannelInput) error {
+	return nil
+}
+
+func (stubChatService) UpdateChat(_ context.Context, input chatsvc.UpdateChatInput) (chatsvc.Chat, error) {
+	title := "General"
+	if input.Title.Set && input.Title.Value != nil {
+		title = *input.Title.Value
+	}
+	return chatsvc.Chat{ID: input.ChatID, Title: title, Type: "standard", Kind: "group"}, nil
+}
+
+func (stubChatService) ListChannels(context.Context, string, string) ([]chatsvc.Chat, error) {
+	return []chatsvc.Chat{{ID: "chat-2", Title: "General / text", Type: "standard", Kind: "channel"}}, nil
+}
+
+func (stubChatService) ListMembers(context.Context, string, string) ([]chatsvc.ChatMember, error) {
+	return []chatsvc.ChatMember{
+		{UserID: "u1", Role: "owner"},
+		{UserID: "u2", Role: "member"},
+	}, nil
+}
+
+func (stubChatService) AddMembers(context.Context, string, string, []string) ([]chatsvc.ChatMember, error) {
+	return []chatsvc.ChatMember{
+		{UserID: "u1", Role: "owner"},
+		{UserID: "u2", Role: "member"},
+		{UserID: "u3", Role: "member"},
+	}, nil
+}
+
+func (stubChatService) UpdateMemberRole(context.Context, string, string, string, string) ([]chatsvc.ChatMember, error) {
+	return []chatsvc.ChatMember{
+		{UserID: "u1", Role: "owner"},
+		{UserID: "u2", Role: "admin"},
+	}, nil
+}
+
+func (stubChatService) RemoveMember(context.Context, string, string, string) ([]chatsvc.ChatMember, error) {
+	return []chatsvc.ChatMember{
+		{UserID: "u1", Role: "owner"},
+	}, nil
+}
+
+func (stubChatService) AcceptInvite(context.Context, string, string) (chatsvc.Chat, error) {
+	return chatsvc.Chat{ID: "chat-1", Title: "General", Type: "standard", Kind: "group"}, nil
+}
+
+func (stubChatService) LeaveChat(context.Context, string, string) error {
+	return nil
+}
+
 func (stubChatService) ListChats(context.Context, string) ([]chatsvc.Chat, error) {
 	return []chatsvc.Chat{{ID: "chat-1", Title: "General", Type: "standard", Kind: "group"}}, nil
 }
@@ -617,6 +673,19 @@ func (s stubAuthService) UpdateProfile(context.Context, authsvc.UpdateProfileInp
 	}, nil
 }
 
+func (s stubAuthService) UpdateSessionIdleTTL(context.Context, string, *int64) (authsvc.User, error) {
+	return authsvc.User{
+		ID:        "u1",
+		Email:     "user@example.com",
+		Username:  "user",
+		FirstName: "User",
+	}, nil
+}
+
+func (s stubAuthService) ChangePassword(context.Context, string, string, string) error {
+	return nil
+}
+
 func (s stubAuthService) UpdateEmail(context.Context, string, string) (authsvc.User, error) {
 	return authsvc.User{
 		ID:        "u1",
@@ -704,6 +773,33 @@ func TestCreateChatRoute(t *testing.T) {
 		t.Fatalf("expected 201, got %d", rr.Code)
 	}
 	if !strings.Contains(rr.Body.String(), `"chat":{"id":"chat-1"`) {
+		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+}
+
+func TestUpdateChatRoute(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		AccessSecret:  "test-secret",
+		Chat:          stubChatService{},
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodPatch, "/api/private/v1/chats/chat-1", strings.NewReader(`{"title":"Renamed"}`))
+	token := makeAccessToken(t, "u1", "test-secret", time.Now().UTC().Add(10*time.Minute).Unix())
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusOK {
+		t.Fatalf("expected 200, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"chat":{"id":"chat-1","title":"Renamed"`) {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
 	}
 }

@@ -33,7 +33,12 @@ edge-up:
 	@chmod +x ../combox-edge/scripts/init-mtls.sh
 	@../combox-edge/scripts/init-mtls.sh init >/dev/null 2>&1 || true
 	@../combox-edge/scripts/init-mtls.sh issue-server combox-backend >/dev/null 2>&1 || true
-	$(EDGE_DC) up -d --build
+	@if $(EDGE_DC) build --help 2>/dev/null | grep -q -- '--progress'; then \
+		$(EDGE_DC) build --progress=plain; \
+	else \
+		$(EDGE_DC) build; \
+	fi
+	$(EDGE_DC) up -d --no-build
 
 edge-down:
 	$(EDGE_DC) down --remove-orphans

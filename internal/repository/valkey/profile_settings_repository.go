@@ -3,12 +3,18 @@ package valkey
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type ProfileSettings struct {
 	ShowLastSeen bool
+}
+
+type ChatNotifications struct {
+	MutedChatIDs  []string
+	UnreadByChat  map[string]int
 }
 
 type ProfileSettingsRepository struct {
@@ -34,6 +40,14 @@ func profileSettingsKey(userID string) string {
 
 func profileRecentGIFsKey(userID string) string {
 	return "profile:gifs:recent:" + strings.TrimSpace(userID)
+}
+
+func mutedChatsKey(userID string) string {
+	return "profile:chats:muted:" + strings.TrimSpace(userID)
+}
+
+func unreadChatsKey(userID string) string {
+	return "profile:chats:unread:" + strings.TrimSpace(userID)
 }
 
 func (r *ProfileSettingsRepository) Get(ctx context.Context, userID string) (ProfileSettings, error) {
@@ -126,6 +140,109 @@ func (r *ProfileSettingsRepository) ListRecentGIFs(ctx context.Context, userID s
 			continue
 		}
 		out = append(out, item)
+	}
+	return out, nil
+}
+
+func (r *ProfileSettingsRepository) SetChatMuted(ctx context.Context, userID, chatID string, muted bool) error {
+	if r == nil || r.c == nil {
+		return nil
+	}
+	userID = strings.TrimSpace(userID)
+	chatID = strings.TrimSpace(chatID)
+	if userID == "" || chatID == "" {
+		return nil
+	}
+
+	key := mutedChatsKey(userID)
+	if muted {
+		pipe := r.c.Client().Pipeline()
+		pipe.SAdd(ctx, key, chatID)
+		pipe.Expire(ctx, key, 365*24*time.Hour)
+		_, err := pipe.Exec(ctx)
+		return err
+	}
+	return r.c.Client().SRem(ctx, key, chatID).Err()
+}
+
+func (r *ProfileSettingsRepository) ListMutedChatIDs(ctx context.Context, userID string) ([]string, error) {
+	if r == nil || r.c == nil || strings.TrimSpace(userID) == "" {
+		return []string{}, nil
+	}
+	items, err := r.c.Client().SMembers(ctx, mutedChatsKey(userID)).Result()
+	if err != nil {
+		return []string{}, nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		id := strings.TrimSpace(item)
+		if id == "" {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func (r *ProfileSettingsRepository) IncrementChatUnread(ctx context.Context, userID, chatID string, delta int) (int, error) {
+	if r == nil || r.c == nil {
+		return 0, nil
+	}
+	userID = strings.TrimSpace(userID)
+	chatID = strings.TrimSpace(chatID)
+	if userID == "" || chatID == "" || delta == 0 {
+		return 0, nil
+	}
+	val, err := r.c.Client().HIncrBy(ctx, unreadChatsKey(userID), chatID, int64(delta)).Result()
+	if err != nil {
+		return 0, err
+	}
+	if val < 0 {
+		_ = r.c.Client().HSet(ctx, unreadChatsKey(userID), chatID, 0).Err()
+		return 0, nil
+	}
+	_ = r.c.Client().Expire(ctx, unreadChatsKey(userID), 365*24*time.Hour).Err()
+	return int(val), nil
+}
+
+func (r *ProfileSettingsRepository) ResetChatUnread(ctx context.Context, userID, chatID string) error {
+	if r == nil || r.c == nil {
+		return nil
+	}
+	userID = strings.TrimSpace(userID)
+	chatID = strings.TrimSpace(chatID)
+	if userID == "" || chatID == "" {
+		return nil
+	}
+	return r.c.Client().HDel(ctx, unreadChatsKey(userID), chatID).Err()
+}
+
+func (r *ProfileSettingsRepository) GetChatNotifications(ctx context.Context, userID string) (ChatNotifications, error) {
+	out := ChatNotifications{
+		MutedChatIDs: []string{},
+		UnreadByChat: map[string]int{},
+	}
+	if r == nil || r.c == nil || strings.TrimSpace(userID) == "" {
+		return out, nil
+	}
+
+	muted, _ := r.ListMutedChatIDs(ctx, userID)
+	out.MutedChatIDs = muted
+
+	raw, err := r.c.Client().HGetAll(ctx, unreadChatsKey(userID)).Result()
+	if err != nil {
+		return out, nil
+	}
+	for chatID, value := range raw {
+		id := strings.TrimSpace(chatID)
+		if id == "" {
+			continue
+		}
+		n, convErr := strconv.Atoi(strings.TrimSpace(value))
+		if convErr != nil || n <= 0 {
+			continue
+		}
+		out.UnreadByChat[id] = n
 	}
 	return out, nil
 }

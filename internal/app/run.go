@@ -99,18 +99,19 @@ func (a chatPublisherAdapter) PublishMessageStatus(ctx context.Context, ev chats
 		return errors.New("valkey event publisher is nil")
 	}
 	err := a.p.PublishMessageStatus(ctx, vkrepo.MessageStatusEvent{
-		MessageID: ev.MessageID,
-		ChatID:    ev.ChatID,
-		UserID:    ev.UserID,
-		Status:    ev.Status,
-		At:        ev.At,
+		MessageID:       ev.MessageID,
+		ChatID:          ev.ChatID,
+		UserID:          ev.UserID,
+		RecipientUserID: ev.RecipientUserID,
+		Status:          ev.Status,
+		At:              ev.At,
 	})
 	if err != nil && a.logger != nil {
 		a.logger.Error("publish ws event failed",
 			slog.String("event", "message.status"),
 			slog.String("chat_id", ev.ChatID),
 			slog.String("message_id", ev.MessageID),
-			slog.String("recipient_user_id", ev.UserID),
+			slog.String("recipient_user_id", ev.RecipientUserID),
 			slog.String("error", err.Error()))
 	}
 	return err
@@ -231,6 +232,40 @@ func (a mediaStoreAdapter) DeleteObject(ctx context.Context, objectKey string) e
 	return a.c.DeleteObject(ctx, objectKey)
 }
 
+type chatInviteStoreAdapter struct {
+	r *vkrepo.ChatInviteRepository
+}
+
+func (a chatInviteStoreAdapter) Create(ctx context.Context, chatID, inviterID, inviteeID string, ttl time.Duration) (chatsvc.ChatInvite, error) {
+	item, err := a.r.Create(ctx, chatID, inviterID, inviteeID, ttl)
+	if err != nil {
+		return chatsvc.ChatInvite{}, err
+	}
+	return chatsvc.ChatInvite{
+		Token:     item.Token,
+		ChatID:    item.ChatID,
+		InviterID: item.InviterID,
+		InviteeID: item.InviteeID,
+		CreatedAt: item.CreatedAt,
+		ExpiresAt: item.ExpiresAt,
+	}, nil
+}
+
+func (a chatInviteStoreAdapter) Consume(ctx context.Context, token string) (chatsvc.ChatInvite, bool, error) {
+	item, found, err := a.r.Consume(ctx, token)
+	if err != nil || !found {
+		return chatsvc.ChatInvite{}, found, err
+	}
+	return chatsvc.ChatInvite{
+		Token:     item.Token,
+		ChatID:    item.ChatID,
+		InviterID: item.InviterID,
+		InviteeID: item.InviteeID,
+		CreatedAt: item.CreatedAt,
+		ExpiresAt: item.ExpiresAt,
+	}, true, nil
+}
+
 func Run(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -300,6 +335,7 @@ func Run(ctx context.Context) error {
 	presenceRepo := vkrepo.NewPresenceRepository(valkeyClient)
 	profileRepo := vkrepo.NewProfileSettingsRepository(valkeyClient)
 	emailChangeRepo := vkrepo.NewEmailChangeRepository(valkeyClient)
+	chatInviteRepo := vkrepo.NewChatInviteRepository(valkeyClient)
 
 	chatPublisher := &chatPublisherAdapter{p: publisher, logger: logger}
 	chatSvc, err := chatsvc.NewWithPublisherAndStatusRepo(chatRepo, msgRepo, chatPublisher, statusRepo)
@@ -307,6 +343,8 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("init chat service: %w", err)
 	}
 	chatSvc.SetAvatarStore(minioClient, 0)
+	chatSvc.SetNotificationRepository(profileRepo)
+	chatSvc.SetInviteRepository(chatInviteStoreAdapter{r: chatInviteRepo}, 0)
 
 	e2eService, err := e2esvc.New(pgrepo.NewE2ERepository(postgresClient))
 	if err != nil {

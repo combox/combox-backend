@@ -4,108 +4,105 @@
 
 [English](./README.md) | [Русский](./README.ru.md)
 
-Backend service for ComBox platform. Provides REST API, WebSocket, and core business logic for chat, authentication, and media handling.
+Backend service for ComBox. It exposes private/public HTTP APIs, WebSocket realtime transport, auth/session flows, chat and channel logic, media storage integration, search, bot integrations, and edge-ready deployment with mTLS.
 
 ## Powered by
 
 [![Go](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org)
 [![Valkey](https://img.shields.io/badge/Valkey-DC382D?style=for-the-badge&logo=valkey&logoColor=white)](https://valkey.io)
+[![MinIO](https://img.shields.io/badge/MinIO-C72E49?style=for-the-badge&logo=minio&logoColor=white)](https://min.io)
 [![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com)
 
 ## Architecture (high level)
 
 ```text
-           Internet / LAN
-                 |
-                 v
-            [ Nginx Edge ]  :443
-                 |
-                 v
-            /api/private/*  -> ComBox Backend
-                 |
-                 v
-          [ HTTP + WS Server ]
-                 |
-      +----------+----------+
-      |          |          |
-   Auth       Chat       Media
- Service     Service    Service
-      |          |          |
-      v          v          v
-  PostgreSQL   Valkey    S3/MinIO
+ Clients (Web / App / Bots)
+            |
+            v
+   /api/private/*   /api/public/*   /ws/*
+            |
+            v
+      [ ComBox Backend ]
+            |
+      +-----+-------------------+------------------+
+      |                         |                  |
+      v                         v                  v
+  PostgreSQL                Valkey             MinIO / S3
+  users, chats,            cache, pubsub,      attachments,
+  messages, bots,          presence,            previews, media
+  sessions, attachments    user settings
 ```
 
-## API Overview
+## What it does
 
-### Authentication (M2)
+- Auth: register, login, refresh, logout, profile, password, email change
+- Realtime: WebSocket transport with Valkey-backed fanout
+- Messaging: chats, groups, channels/topics, reactions, message updates/deletes
+- Media: attachment metadata + MinIO/S3-backed object access
+- Search: people and public chats
+- Bots: public bot info, bot tokens, bot webhooks, system bot notifications
+- Presence and per-user settings: last seen visibility, GIF recents, mute/unread counters
 
-- `POST /api/private/v1/auth/register`
-- `POST /api/private/v1/auth/login`
-- `POST /api/private/v1/auth/refresh`
-- `POST /api/private/v1/auth/logout`
+## API surface
 
-All private endpoints require `Authorization: Bearer <access_token>` header.
+Private HTTP:
 
-### Chat (M3)
+- `/api/private/v1/auth/*`
+- `/api/private/v1/profile`
+- `/api/private/v1/profile/password`
+- `/api/private/v1/profile/email/change/*`
+- `/api/private/v1/profile/settings`
+- `/api/private/v1/chats`
+- `/api/private/v1/chats/{chat_id}/messages`
+- `/api/private/v1/messages/{message_id}`
+- `/api/private/v1/messages/{message_id}/read`
+- `/api/private/v1/messages/{message_id}/reactions`
+- `/api/private/v1/media/*`
+- `/api/private/v1/search`
+- `/api/private/v1/gifs/*`
+- `/api/private/v1/presence`
 
-- `GET /api/private/v1/chats`
-- `POST /api/private/v1/chats`
-- `GET /api/private/v1/chats/{chat_id}/messages`
-- `POST /api/private/v1/chats/{chat_id}/messages`
-- `PATCH /api/private/v1/messages/{message_id}`
-- `DELETE /api/private/v1/messages/{message_id}`
-- `POST /api/private/v1/messages/{message_id}/read`
+Public HTTP:
 
-### Realtime (M4)
+- `/api/public/v1/bots/{bot_id}/info`
+- `/api/public/v1/bots/{bot_id}/webhooks`
 
-- WebSocket: `wss://<host>/api/private/v1/ws?access_token=<token>` (use `ws://` only for local non-TLS)
-- Subscribe/unsubscribe to chat streams
-- Fanout across instances via Valkey
+Realtime:
 
-### Media (M5)
+- `/api/private/v1/ws`
 
-- `POST /api/private/v1/media/upload-url` (presigned)
-- `POST /api/private/v1/media/attachments`
-- `GET /api/private/v1/media/attachments/{id}`
+Health:
 
-### Public API (M5)
+- `/healthz`
+- `/readyz`
 
-- `GET /api/public/v1/bots/{bot_id}/info`
-- `POST /api/public/v1/bots/{bot_id}/webhooks`
+## Realtime model
 
-## Security
+WebSocket clients connect with the same authenticated user context as HTTP.
 
-### Authentication
+- backend subscribes to user/device/presence channels in Valkey
+- chat events are faned out across backend instances
+- private clients can request chats, messages, send messages, mark reads, toggle reactions, and subscribe to presence streams
 
-- JWT access tokens (short-lived) + refresh tokens (long-lived)
-- Refresh sessions stored in PostgreSQL with revocation support
-- WebSocket authentication via query parameter `access_token`
+This keeps the backend horizontally scalable without sticky state in process memory.
 
-Session persistence is based on a sliding refresh-session expiration:
+## Auth and session model
 
-- User setting `users.session_idle_ttl_seconds` defines how long the user can stay offline.
-- Each successful `refresh` extends `sessions.expires_at = now + session_idle_ttl`.
-- If the user does not refresh within the selected period, the session expires and login is required.
+- access tokens are short-lived JWTs
+- refresh sessions are stored in PostgreSQL
+- `users.session_idle_ttl_seconds` controls sliding refresh-session lifetime
+- each successful refresh extends the session
+- if the user stays inactive beyond the configured idle TTL, login is required again
 
-### Authorization
+## Media model
 
-- Private API (`/api/private/*`) requires valid Bearer token
-- User context extracted and validated via centralized middleware
-- Public API (`/api/public/*`) uses bot token scopes
+ComBox uses MinIO locally and any S3-compatible storage in production.
 
-### Error responses
-
-All errors return structured JSON envelope:
-
-```json
-{
-  "code": "invalid_credentials",
-  "message": "invalid credentials",
-  "details": {},
-  "request_id": "req_123456789"
-}
-```
+- metadata lives in PostgreSQL
+- binary objects live in MinIO/S3
+- backend exposes attachment records and media lookup endpoints
+- edge/public URL strategy is controlled through env vars such as `MINIO_PUBLIC_BASE_URL`
 
 ## Deployment modes
 
@@ -113,23 +110,31 @@ All errors return structured JSON envelope:
 
 ```bash
 cp .env.example .env
-# Edit .env for local PostgreSQL/Valkey
+# edit .env
+
 make run
 ```
 
-### Edge gateway mode (recommended)
+### Local Docker image
 
-Backend runs without host ports, accessible only via edge nginx:
+```bash
+make docker-build
+make docker-run
+```
+
+### Edge mode
+
+Run backend inside the shared edge Docker network, without publishing host ports:
 
 ```bash
 make edge-up
 ```
 
-This uses `docker-compose.edge.yml` and joins external network `combox-edge-core`.
+This uses [docker-compose.edge.yml](./docker-compose.edge.yml) and joins external network `combox-edge-core`.
 
-### Multi-machine with mTLS
+### Multi-machine behind edge with mTLS
 
-For VPS deployment behind edge with mutual TLS:
+For deployment behind `combox-edge`, enable TLS and client cert verification:
 
 ```bash
 TLS_ENABLED=true
@@ -139,63 +144,78 @@ TLS_CLIENT_CA_FILE=/etc/combox/mtls/ca.crt
 HTTP_ADDRESS=:8443
 ```
 
-Place certs on the VPS and mount them into the container (see `docker-compose.edge.yml`).
+The edge layer then forwards HTTPS+mTLS traffic to backend instances.
 
 ## Environment
 
-Required variables:
+Core variables:
 
-- `POSTGRES_DSN` - PostgreSQL connection string
-- `VALKEY_ADDR` - Valkey/Redis address
-- `DEFAULT_LOCALE` - Default response locale (e.g., `en`)
-- `STRINGS_PATH` - Path to i18n strings directory
-- `AUTH_ACCESS_SECRET` - JWT access token signing secret
-- `AUTH_REFRESH_SECRET` - JWT refresh token signing secret
-- `GIPHY_API_KEY` - API key for GIF search/trending/recent integrations
+- `APP_ENV`
+- `HTTP_ADDRESS`
+- `DEFAULT_LOCALE`
+- `STRINGS_PATH`
+- `POSTGRES_DSN`
+- `VALKEY_ADDR`
+- `VALKEY_PASSWORD`
+- `VALKEY_DB`
+- `AUTH_ACCESS_SECRET`
+- `AUTH_REFRESH_SECRET`
+- `AUTH_ACCESS_TTL`
+- `AUTH_REFRESH_TTL`
+- `BOT_TOKEN_PEPPER`
 
-Optional variables have defaults in `.env.example`.
+Email / auth flow:
 
-## Health checks
+- `AUTH_EMAIL_VERIFY_ENABLED`
+- `AUTH_EMAIL_CODE_TTL`
+- `AUTH_EMAIL_CODE_MAX_ATTEMPTS`
+- `RESEND_API_KEY`
+- `RESEND_FROM`
+- `RESEND_BASE_URL`
 
-- `GET /healthz` - Liveness probe (always 200)
-- `GET /readyz` - Readiness probe (checks Postgres + Valkey)
+Storage:
 
-## Database
+- `MINIO_API_INTERNAL`
+- `MINIO_PUBLIC_BASE_URL`
+- `MINIO_BUCKET`
+- `MINIO_ROOT_USER`
+- `MINIO_ROOT_PASSWORD`
+- `MINIO_SECURE`
+- `MINIO_REGION`
+- `MINIO_SSE_MODE`
 
-### Migrations
+Other:
 
-- Automatic on startup if `MIGRATIONS_ENABLED=true`
-- Files in `MIGRATIONS_PATH` (default: `migrations`)
-- Applied migrations tracked in `schema_migrations` table
+- `GIPHY_API_KEY`
+- `MIGRATIONS_ENABLED`
+- `MIGRATIONS_PATH`
+- `READY_TIMEOUT`
 
-### Schema
+See [.env.example](./.env.example) for defaults and local examples.
 
-Core tables:
+## Migrations and schema
 
-- `users` - User accounts
-- `sessions` - Refresh token sessions
-- `chats` - Chat metadata
-- `messages` - Chat messages
-- `attachments` - Media metadata
+- migrations live in [migrations/](./migrations)
+- startup can apply them automatically when `MIGRATIONS_ENABLED=true`
+- applied migrations are tracked in `schema_migrations`
 
-## Internationalization
+Core persisted domains:
 
-- Response texts served from `strings/*.json`
-- Request locale from `Accept-Language` header
-- Fallback to `DEFAULT_LOCALE`
-- Supports structured error messages per locale
+- users and sessions
+- chats, channels, memberships
+- messages and reactions
+- attachments/media sessions
+- bots, bot tokens, bot webhooks
 
 ## Testing
 
-### Unit tests
+Unit tests:
 
 ```bash
 go test ./...
 ```
 
-### E2E tests
-
-Requires real Postgres + Valkey:
+E2E tests:
 
 ```bash
 docker compose -f docker-compose.e2e.yml up -d
@@ -204,74 +224,40 @@ export E2E_VALKEY_ADDR='127.0.0.1:16379'
 go test -tags=e2e ./tests/e2e -count=1
 ```
 
-## Build and Docker
+## Build and operations
 
-### Local build
+Common targets:
 
-```bash
-make build
-```
-
-### Docker image
-
-```bash
-make docker-build
-```
-
-### Multi-platform build
-
-```bash
-make docker-build-multi
-```
-
-## Observability
-
-### Logging
-
-- Structured JSON logging
-- Request IDs for tracing
-- Log levels: `debug`, `info`, `warn`, `error`
-- Configurable via `LOG_LEVEL`
-
-### Metrics
-
-TODO: Add Prometheus metrics endpoint.
-
-## Development workflow
-
-1. Create feature branch from `main`
-2. Implement changes with tests
-3. Run `make test` and `make lint`
-4. Update documentation if needed
-5. Submit pull request
+- `make tidy`
+- `make fmt`
+- `make build`
+- `make run`
+- `make test`
+- `make docker-build`
+- `make docker-run`
+- `make edge-up`
+- `make edge-down`
+- `make edge-logs`
 
 ## Repo layout
 
-- `cmd/api/` - Application entrypoint
-- `internal/` - Private application code
-  - `app/` - Application setup and DI
-  - `config/` - Configuration loading
-  - `observability/` - Logging and metrics
-  - `transport/` - HTTP/WebSocket handlers
-  - `service/` - Business logic
-  - `repository/` - Data access layer
-- `migrations/` - Database migrations
-- `strings/` - i18n message files
-- `tests/e2e/` - End-to-end tests
-- `docker-compose*.yml` - Development containers
-- `Dockerfile` - Container build
-- `Makefile` - Build automation
+- `cmd/api/` - application entrypoint
+- `internal/app/` - wiring and dependency setup
+- `internal/config/` - env/config loading
+- `internal/transport/http/` - HTTP + WS handlers
+- `internal/service/` - business logic
+- `internal/repository/postgres/` - PostgreSQL repositories
+- `internal/repository/valkey/` - Valkey repositories
+- `internal/integration/` - external/system integrations
+- `migrations/` - database migrations
+- `strings/` - localized response texts
+- `tests/e2e/` - end-to-end tests
 
-## MWP
+## Notes
 
-- **M1** - Project bootstrap, health checks, migrations
-- **M2** - Authentication service (register/login/refresh/logout)
-- **M3** - Chat core (create/list chats, messages, pagination)
-- **M4** - Realtime WebSocket with fanout
-- **M5** - Media handling and public API
-- **M6** - Hardening and performance
-
-See `mwp.md` for detailed milestone specifications.
+- user-facing response texts belong in `strings/`, not hardcoded transport logic
+- edge deployment assumptions are aligned with `combox-edge`
+- system-bot and bot-token functionality already exist; new moderation/collectible flows should extend those primitives instead of duplicating them
 
 ## License
 
@@ -281,5 +267,5 @@ See `mwp.md` for detailed milestone specifications.
 
 ## Author
 
-[Ernela](https://github.com/Ernous) - Developer;
+[Ernela](https://github.com/Ernous) - Developer;  
 [D7TUN6](https://github.com/D7TUN6) - Idea, Developer

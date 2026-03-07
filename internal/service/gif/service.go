@@ -65,8 +65,8 @@ func (s *Service) SearchGIFs(ctx context.Context, q, pos string, limit int) (Sea
 
 type tenorResponse struct {
 	Data []struct {
-		ID    string `json:"id"`
-		Title string `json:"title"`
+		ID     string `json:"id"`
+		Title  string `json:"title"`
 		Images struct {
 			FixedWidth struct {
 				URL    string `json:"url"`
@@ -160,16 +160,11 @@ func (s *Service) search(ctx context.Context, q, pos string, limit int) (SearchR
 			title = "GIF"
 		}
 		id := strings.TrimSpace(r.ID)
-		shareURL := cleanURL(full)
-		if id != "" {
-			shareURL = "https://giphy.com/gifs/" + id
-		}
-
 		items = append(items, Item{
 			ID:         id,
 			Title:      title,
 			PreviewURL: preview,
-			URL:        shareURL,
+			URL:        cleanURL(full),
 			Width:      w,
 			Height:     h,
 		})

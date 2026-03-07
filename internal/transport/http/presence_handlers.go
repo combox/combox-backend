@@ -79,6 +79,10 @@ func newPresenceHandler(presenceRepo *vkrepo.PresenceRepository, settingsRepo *v
 
 type profileSettingsRequest struct {
 	ShowLastSeen *bool `json:"show_last_seen"`
+	ChatMute     *struct {
+		ChatID string `json:"chat_id"`
+		Muted  bool   `json:"muted"`
+	} `json:"chat_mute"`
 }
 
 func newProfileSettingsHandler(settingsRepo *vkrepo.ProfileSettingsRepository, i18n Translator, defaultLocale string) http.HandlerFunc {
@@ -92,11 +96,16 @@ func newProfileSettingsHandler(settingsRepo *vkrepo.ProfileSettingsRepository, i
 		switch r.Method {
 		case http.MethodGet:
 			settings, _ := settingsRepo.Get(r.Context(), userID)
+			notifications, _ := settingsRepo.GetChatNotifications(r.Context(), userID)
 			locale := requestLocale(r, defaultLocale)
 			writeJSON(w, http.StatusOK, map[string]any{
 				"message": i18n.Translate(locale, "status.ok"),
 				"settings": map[string]any{
 					"show_last_seen": settings.ShowLastSeen,
+				},
+				"chat_notifications": map[string]any{
+					"muted_chat_ids": notifications.MutedChatIDs,
+					"unread_by_chat": notifications.UnreadByChat,
 				},
 			})
 		case http.MethodPatch:
@@ -105,19 +114,41 @@ func newProfileSettingsHandler(settingsRepo *vkrepo.ProfileSettingsRepository, i
 				writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
 				return
 			}
-			if req.ShowLastSeen == nil {
+			if req.ShowLastSeen == nil && req.ChatMute == nil {
 				writeAPIError(w, r, http.StatusBadRequest, "invalid_argument", "error.request.invalid_input", nil, i18n, defaultLocale)
 				return
 			}
-			if err := settingsRepo.Set(r.Context(), userID, *req.ShowLastSeen); err != nil {
-				writeAPIError(w, r, http.StatusInternalServerError, "internal", "error.internal", nil, i18n, defaultLocale)
-				return
+
+			if req.ShowLastSeen != nil {
+				if err := settingsRepo.Set(r.Context(), userID, *req.ShowLastSeen); err != nil {
+					writeAPIError(w, r, http.StatusInternalServerError, "internal", "error.internal", nil, i18n, defaultLocale)
+					return
+				}
 			}
+
+			if req.ChatMute != nil {
+				chatID := strings.TrimSpace(req.ChatMute.ChatID)
+				if chatID == "" {
+					writeAPIError(w, r, http.StatusBadRequest, "invalid_argument", "error.request.invalid_input", nil, i18n, defaultLocale)
+					return
+				}
+				if err := settingsRepo.SetChatMuted(r.Context(), userID, chatID, req.ChatMute.Muted); err != nil {
+					writeAPIError(w, r, http.StatusInternalServerError, "internal", "error.internal", nil, i18n, defaultLocale)
+					return
+				}
+			}
+
+			settings, _ := settingsRepo.Get(r.Context(), userID)
+			notifications, _ := settingsRepo.GetChatNotifications(r.Context(), userID)
 			locale := requestLocale(r, defaultLocale)
 			writeJSON(w, http.StatusOK, map[string]any{
 				"message": i18n.Translate(locale, "status.ok"),
 				"settings": map[string]any{
-					"show_last_seen": *req.ShowLastSeen,
+					"show_last_seen": settings.ShowLastSeen,
+				},
+				"chat_notifications": map[string]any{
+					"muted_chat_ids": notifications.MutedChatIDs,
+					"unread_by_chat": notifications.UnreadByChat,
 				},
 			})
 		default:

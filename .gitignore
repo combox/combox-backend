@@ -1,3 +1,15 @@
 .env
+.env.local
+.env.*.local
+
 bin/
-*.crt
+dist/
+coverage/
+*.log
+*.out
+*.test
+
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

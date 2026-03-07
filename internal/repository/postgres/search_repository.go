@@ -38,6 +38,7 @@ func (r *SearchRepository) SearchUsers(ctx context.Context, q string, limit int)
 			       username,
 			       COALESCE(first_name, ''),
 			       last_name,
+			       birth_date::text,
 			       avatar_data_url,
 			       avatar_gradient
 			FROM users
@@ -55,7 +56,7 @@ func (r *SearchRepository) SearchUsers(ctx context.Context, q string, limit int)
 		out := make([]searchsvc.UserResult, 0)
 		for rows.Next() {
 			var item searchsvc.UserResult
-			if err := rows.Scan(&item.ID, &item.Email, &item.Username, &item.FirstName, &item.LastName, &item.AvatarDataURL, &item.AvatarGradient); err != nil {
+			if err := rows.Scan(&item.ID, &item.Email, &item.Username, &item.FirstName, &item.LastName, &item.BirthDate, &item.AvatarDataURL, &item.AvatarGradient); err != nil {
 				return nil, err
 			}
 			out = append(out, item)
@@ -79,6 +80,7 @@ func (r *SearchRepository) SearchUsers(ctx context.Context, q string, limit int)
 		       username,
 		       COALESCE(first_name, ''),
 		       last_name,
+		       birth_date::text,
 		       avatar_data_url,
 		       avatar_gradient
 		FROM users
@@ -99,7 +101,7 @@ func (r *SearchRepository) SearchUsers(ctx context.Context, q string, limit int)
 	out := make([]searchsvc.UserResult, 0)
 	for rows.Next() {
 		var item searchsvc.UserResult
-		if err := rows.Scan(&item.ID, &item.Email, &item.Username, &item.FirstName, &item.LastName, &item.AvatarDataURL, &item.AvatarGradient); err != nil {
+		if err := rows.Scan(&item.ID, &item.Email, &item.Username, &item.FirstName, &item.LastName, &item.BirthDate, &item.AvatarDataURL, &item.AvatarGradient); err != nil {
 			return nil, err
 		}
 		out = append(out, item)

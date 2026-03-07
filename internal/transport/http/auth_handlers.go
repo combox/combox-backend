@@ -252,14 +252,15 @@ func newLoginHandler(auth AuthService, emailCode EmailCodeService, i18n Translat
 
 func mapAuthUser(user authsvc.User) map[string]any {
 	return map[string]any{
-		"id":              user.ID,
-		"email":           user.Email,
-		"username":        user.Username,
-		"first_name":      user.FirstName,
-		"last_name":       user.LastName,
-		"birth_date":      user.BirthDate,
-		"avatar_data_url": user.AvatarDataURL,
-		"avatar_gradient": user.AvatarGradient,
+		"id":                       user.ID,
+		"email":                    user.Email,
+		"username":                 user.Username,
+		"first_name":               user.FirstName,
+		"last_name":                user.LastName,
+		"birth_date":               user.BirthDate,
+		"avatar_data_url":          user.AvatarDataURL,
+		"avatar_gradient":          user.AvatarGradient,
+		"session_idle_ttl_seconds": user.SessionIdleTTLSeconds,
 	}
 }
 

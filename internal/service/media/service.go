@@ -29,6 +29,44 @@ type Error struct {
 	Cause      error
 }
 
+type BackfillMetaInput struct {
+	Limit int
+}
+
+type BackfillMetaResult struct {
+	Scanned  int
+	Updated  int
+	Failures int
+}
+
+func (s *Service) BackfillAttachmentMeta(ctx context.Context, input BackfillMetaInput) (BackfillMetaResult, error) {
+	limit := input.Limit
+	if limit <= 0 {
+		limit = 500
+	}
+	items, err := s.repo.ListAttachmentsMissingMeta(ctx, limit)
+	if err != nil {
+		return BackfillMetaResult{}, err
+	}
+	result := BackfillMetaResult{Scanned: len(items)}
+	for _, a := range items {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		w, h, d := s.probeMeta(ctx, a)
+		if w == nil && h == nil && d == nil {
+			result.Failures += 1
+			continue
+		}
+		if err := s.repo.SetAttachmentMeta(ctx, a.ID, w, h, d); err != nil {
+			result.Failures += 1
+			continue
+		}
+		result.Updated += 1
+	}
+	return result, nil
+}
+
 func (e *Error) Error() string {
 	if e == nil {
 		return ""
@@ -141,8 +179,10 @@ type CreateSessionOutput struct {
 type Repository interface {
 	CreateAttachment(ctx context.Context, a Attachment) (Attachment, error)
 	GetAttachment(ctx context.Context, id string) (Attachment, error)
+	ListAttachmentsMissingMeta(ctx context.Context, limit int) ([]Attachment, error)
 	CanUserAccessAttachment(ctx context.Context, userID, attachmentID string) (bool, error)
 	SetAttachmentUploadID(ctx context.Context, id string, uploadID string) error
+	SetAttachmentMeta(ctx context.Context, id string, width *int, height *int, durationMS *int) error
 	SetProcessing(ctx context.Context, id string, status string, processingError *string, previewObjectKey *string, hlsMasterObjectKey *string, processedAt *time.Time) error
 	CreateSession(ctx context.Context, s MediaSession) (MediaSession, error)
 	GetSession(ctx context.Context, id string) (MediaSession, error)

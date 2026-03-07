@@ -4,108 +4,105 @@
 
 [English](./README.md) | [Русский](./README.ru.md)
 
-Бэкенд-сервис для платформы ComBox. Предоставляет REST API, WebSocket и основную бизнес-логику для чата, аутентификации и обработки медиа.
+Бэкенд-сервис для ComBox. Он отдаёт приватный и публичный HTTP API, WebSocket realtime-транспорт, auth/session flows, логику чатов и каналов, интеграцию с медиа-хранилищем, поиск, bot integrations и готов для edge-развёртывания с mTLS.
 
 ## Технологии
 
 [![Go](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org)
 [![Valkey](https://img.shields.io/badge/Valkey-DC382D?style=for-the-badge&logo=valkey&logoColor=white)](https://valkey.io)
+[![MinIO](https://img.shields.io/badge/MinIO-C72E49?style=for-the-badge&logo=minio&logoColor=white)](https://min.io)
 [![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com)
 
-## Архитектура (высокоуровневая)
+## Архитектура (высокоуровнево)
 
 ```text
-           Интернет / LAN
-                 |
-                 v
-            [ Nginx Edge ]  :443
-                 |
-                 v
-            /api/private/*  -> ComBox Backend
-                 |
-                 v
-          [ HTTP + WS Server ]
-                 |
-      +----------+----------+
-      |          |          |
-   Auth       Chat       Media
- Service     Service    Service
-      |          |          |
-      v          v          v
-  PostgreSQL   Valkey    S3/MinIO
+ Клиенты (Web / App / Bots)
+            |
+            v
+   /api/private/*   /api/public/*   /ws/*
+            |
+            v
+      [ ComBox Backend ]
+            |
+      +-----+-------------------+------------------+
+      |                         |                  |
+      v                         v                  v
+  PostgreSQL                Valkey             MinIO / S3
+  users, chats,            cache, pubsub,      attachments,
+  messages, bots,          presence,            previews, media
+  sessions, attachments    user settings
 ```
 
-## Обзор API
+## Что умеет
 
-### Аутентификация (M2)
+- Auth: register, login, refresh, logout, profile, password, email change
+- Realtime: WebSocket transport с fanout через Valkey
+- Messaging: чаты, группы, каналы/топики, реакции, update/delete сообщений
+- Media: метаданные вложений + MinIO/S3 storage
+- Search: люди и публичные чаты
+- Bots: публичная bot info, bot tokens, bot webhooks, system bot notifications
+- Presence и пользовательские настройки: last seen visibility, recent GIFs, mute/unread counters
 
-- `POST /api/private/v1/auth/register`
-- `POST /api/private/v1/auth/login`
-- `POST /api/private/v1/auth/refresh`
-- `POST /api/private/v1/auth/logout`
+## Поверхность API
 
-Все приватные эндпоинты требуют заголовок `Authorization: Bearer <access_token>`.
+Приватный HTTP:
 
-### Чат (M3)
+- `/api/private/v1/auth/*`
+- `/api/private/v1/profile`
+- `/api/private/v1/profile/password`
+- `/api/private/v1/profile/email/change/*`
+- `/api/private/v1/profile/settings`
+- `/api/private/v1/chats`
+- `/api/private/v1/chats/{chat_id}/messages`
+- `/api/private/v1/messages/{message_id}`
+- `/api/private/v1/messages/{message_id}/read`
+- `/api/private/v1/messages/{message_id}/reactions`
+- `/api/private/v1/media/*`
+- `/api/private/v1/search`
+- `/api/private/v1/gifs/*`
+- `/api/private/v1/presence`
 
-- `GET /api/private/v1/chats`
-- `POST /api/private/v1/chats`
-- `GET /api/private/v1/chats/{chat_id}/messages`
-- `POST /api/private/v1/chats/{chat_id}/messages`
-- `PATCH /api/private/v1/messages/{message_id}`
-- `DELETE /api/private/v1/messages/{message_id}`
-- `POST /api/private/v1/messages/{message_id}/read`
+Публичный HTTP:
 
-### Реальное время (M4)
+- `/api/public/v1/bots/{bot_id}/info`
+- `/api/public/v1/bots/{bot_id}/webhooks`
 
-- WebSocket: `wss://<host>/api/private/v1/ws?access_token=<token>` (используй `ws://` только локально без TLS)
-- Подписка/отписка от потоков чата
-- Фанаут между инстансами через Valkey
+Realtime:
 
-### Медиа (M5)
+- `/api/private/v1/ws`
 
-- `POST /api/private/v1/media/upload-url` (presigned)
-- `POST /api/private/v1/media/attachments`
-- `GET /api/private/v1/media/attachments/{id}`
+Health:
 
-### Публичный API (M5)
+- `/healthz`
+- `/readyz`
 
-- `GET /api/public/v1/bots/{bot_id}/info`
-- `POST /api/public/v1/bots/{bot_id}/webhooks`
+## Realtime-модель
 
-## Безопасность
+WebSocket-клиенты подключаются с тем же user context, что и HTTP.
 
-### Аутентификация
+- backend подписывается на user/device/presence channels в Valkey
+- chat events расходятся между backend-инстансами
+- приватные клиенты могут запрашивать чаты, сообщения, отправлять сообщения, отмечать reads и переключать реакции
 
-- JWT access токены (короткоживущие) + refresh токены (долгоживущие)
-- Сессии refresh хранятся в PostgreSQL с поддержкой отзыва
-- Аутентификация WebSocket через query параметр `access_token`
+Это позволяет масштабировать backend горизонтально без sticky state в памяти процесса.
 
-Сохранение авторизации реализовано через sliding expiration для refresh-сессии:
+## Auth и сессии
 
-- Пользовательская настройка `users.session_idle_ttl_seconds` определяет, сколько времени пользователь может не заходить.
-- Каждый успешный `refresh` продлевает `sessions.expires_at = now + session_idle_ttl`.
-- Если пользователь не обновлял токены в пределах выбранного периода, сессия истечёт и потребуется логин.
+- access tokens — короткоживущие JWT
+- refresh-сессии хранятся в PostgreSQL
+- `users.session_idle_ttl_seconds` управляет sliding lifetime refresh-сессии
+- каждый успешный refresh продлевает сессию
+- если пользователь был неактивен дольше заданного idle TTL, нужен повторный логин
 
-### Авторизация
+## Медиа-модель
 
-- Приватный API (`/api/private/*`) требует валидный Bearer токен
-- Контекст пользователя извлекается и проверяется через централизованное middleware
-- Публичный API (`/api/public/*`) использует bot токены с областями доступа
+ComBox использует MinIO локально и любой S3-compatible storage в production.
 
-### Обработка ошибок
-
-Все ошибки возвращают структурированный JSON:
-
-```json
-{
-  "code": "invalid_credentials",
-  "message": "неверные учётные данные",
-  "details": {},
-  "request_id": "req_123456789"
-}
-```
+- метаданные лежат в PostgreSQL
+- бинарные объекты лежат в MinIO/S3
+- backend отдаёт attachment records и media lookup endpoints
+- стратегия публичных URL настраивается через env вроде `MINIO_PUBLIC_BASE_URL`
 
 ## Режимы развёртывания
 
@@ -113,23 +110,31 @@
 
 ```bash
 cp .env.example .env
-# Отредактировать .env для локальных PostgreSQL/Valkey
+# отредактировать .env
+
 make run
 ```
 
-### Edge gateway режим (рекомендуется)
+### Локальный Docker-образ
 
-Бэкенд работает без публикации портов, доступен только через edge nginx:
+```bash
+make docker-build
+make docker-run
+```
+
+### Edge mode
+
+Запуск backend внутри общей edge-сети без публикации host ports:
 
 ```bash
 make edge-up
 ```
 
-Использует `docker-compose.edge.yml` и подключается к внешней сети `combox-edge-core`.
+Используется [docker-compose.edge.yml](./docker-compose.edge.yml) и внешняя сеть `combox-edge-core`.
 
-### Multi-machine с mTLS
+### Multi-machine behind edge with mTLS
 
-Для развёртывания на VPS за edge с взаимным TLS:
+Для развёртывания за `combox-edge` с взаимным TLS:
 
 ```bash
 TLS_ENABLED=true
@@ -139,63 +144,78 @@ TLS_CLIENT_CA_FILE=/etc/combox/mtls/ca.crt
 HTTP_ADDRESS=:8443
 ```
 
-Разместите сертификаты на VPS и смонтируйте их в контейнер (см. `docker-compose.edge.yml`).
+Дальше edge-прослойка форвардит HTTPS+mTLS трафик на backend-инстансы.
 
 ## Переменные окружения
 
-Обязательные переменные:
+Основные переменные:
 
-- `POSTGRES_DSN` - Строка подключения к PostgreSQL
-- `VALKEY_ADDR` - Адрес Valkey/Redis
-- `DEFAULT_LOCALE` - Локаль ответов по умолчанию (например, `ru`)
-- `STRINGS_PATH` - Путь к директории i18n строк
-- `AUTH_ACCESS_SECRET` - Секрет для подписи JWT access токенов
-- `AUTH_REFRESH_SECRET` - Секрет для подписи JWT refresh токенов
-- `GIPHY_API_KEY` - API ключ для интеграции поиска/популярных/недавних GIF
+- `APP_ENV`
+- `HTTP_ADDRESS`
+- `DEFAULT_LOCALE`
+- `STRINGS_PATH`
+- `POSTGRES_DSN`
+- `VALKEY_ADDR`
+- `VALKEY_PASSWORD`
+- `VALKEY_DB`
+- `AUTH_ACCESS_SECRET`
+- `AUTH_REFRESH_SECRET`
+- `AUTH_ACCESS_TTL`
+- `AUTH_REFRESH_TTL`
+- `BOT_TOKEN_PEPPER`
 
-Опциональные переменные имеют значения по умолчанию в `.env.example`.
+Email / auth flow:
 
-## Health checks
+- `AUTH_EMAIL_VERIFY_ENABLED`
+- `AUTH_EMAIL_CODE_TTL`
+- `AUTH_EMAIL_CODE_MAX_ATTEMPTS`
+- `RESEND_API_KEY`
+- `RESEND_FROM`
+- `RESEND_BASE_URL`
 
-- `GET /healthz` - Liveness probe (всегда 200)
-- `GET /readyz` - Readiness probe (проверяет Postgres + Valkey)
+Storage:
 
-## База данных
+- `MINIO_API_INTERNAL`
+- `MINIO_PUBLIC_BASE_URL`
+- `MINIO_BUCKET`
+- `MINIO_ROOT_USER`
+- `MINIO_ROOT_PASSWORD`
+- `MINIO_SECURE`
+- `MINIO_REGION`
+- `MINIO_SSE_MODE`
 
-### Миграции
+Прочее:
 
-- Автоматические при запуске если `MIGRATIONS_ENABLED=true`
-- Файлы в `MIGRATIONS_PATH` (по умолчанию: `migrations`)
-- Применённые миграции отслеживаются в таблице `schema_migrations`
+- `GIPHY_API_KEY`
+- `MIGRATIONS_ENABLED`
+- `MIGRATIONS_PATH`
+- `READY_TIMEOUT`
 
-### Схема
+Смотри [.env.example](./.env.example) для значений по умолчанию и локальных примеров.
 
-Основные таблицы:
+## Миграции и схема
 
-- `users` - Пользователи
-- `sessions` - Сессии refresh токенов
-- `chats` - Метаданные чатов
-- `messages` - Сообщения чатов
-- `attachments` - Метаданные медиа
+- миграции лежат в [migrations/](./migrations)
+- backend может применять их автоматически при старте, если `MIGRATIONS_ENABLED=true`
+- применённые миграции отслеживаются в `schema_migrations`
 
-## Интернационализация
+Основные домены хранения:
 
-- Тексты ответов из `strings/*.json`
-- Локаль запроса из заголовка `Accept-Language`
-- Fallback на `DEFAULT_LOCALE`
-- Поддержка структурированных сообщений об ошибках по локали
+- users и sessions
+- chats, channels, memberships
+- messages и reactions
+- attachments/media sessions
+- bots, bot tokens, bot webhooks
 
 ## Тестирование
 
-### Юнит-тесты
+Юнит-тесты:
 
 ```bash
 go test ./...
 ```
 
-### E2E тесты
-
-Требуют реальные Postgres + Valkey:
+E2E-тесты:
 
 ```bash
 docker compose -f docker-compose.e2e.yml up -d
@@ -204,74 +224,40 @@ export E2E_VALKEY_ADDR='127.0.0.1:16379'
 go test -tags=e2e ./tests/e2e -count=1
 ```
 
-## Сборка и Docker
+## Сборка и операции
 
-### Локальная сборка
+Основные цели:
 
-```bash
-make build
-```
-
-### Docker образ
-
-```bash
-make docker-build
-```
-
-### Мультиплатформенная сборка
-
-```bash
-make docker-build-multi
-```
-
-## Observability
-
-### Логирование
-
-- Структурированный JSON лог
-- Request ID для трейсинга
-- Уровни логов: `debug`, `info`, `warn`, `error`
-- Настраивается через `LOG_LEVEL`
-
-### Метрики
-
-TODO: Добавить endpoint Prometheus метрик.
-
-## Процесс разработки
-
-1. Создать feature ветку от `main`
-2. Реализовать изменения с тестами
-3. Запустить `make test` и `make lint`
-4. Обновить документацию при необходимости
-5. Отправить pull request
+- `make tidy`
+- `make fmt`
+- `make build`
+- `make run`
+- `make test`
+- `make docker-build`
+- `make docker-run`
+- `make edge-up`
+- `make edge-down`
+- `make edge-logs`
 
 ## Структура репозитория
 
-- `cmd/api/` - Точка входа приложения
-- `internal/` - Приватный код приложения
-  - `app/` - Настройка и DI приложения
-  - `config/` - Загрузка конфигурации
-  - `observability/` - Логирование и метрики
-  - `transport/` - HTTP/WebSocket обработчики
-  - `service/` - Бизнес-логика
-  - `repository/` - Слой доступа к данным
-- `migrations/` - Миграции базы данных
-- `strings/` - Файлы i18n сообщений
-- `tests/e2e/` - End-to-end тесты
-- `docker-compose*.yml` - Контейнеры для разработки
-- `Dockerfile` - Сборка контейнера
-- `Makefile` - Автоматизация сборки
+- `cmd/api/` - entrypoint приложения
+- `internal/app/` - wiring и dependency setup
+- `internal/config/` - env/config loading
+- `internal/transport/http/` - HTTP + WS handlers
+- `internal/service/` - business logic
+- `internal/repository/postgres/` - PostgreSQL repositories
+- `internal/repository/valkey/` - Valkey repositories
+- `internal/integration/` - external/system integrations
+- `migrations/` - database migrations
+- `strings/` - локализованные response texts
+- `tests/e2e/` - end-to-end tests
 
-## Майлстоуны
+## Заметки
 
-- **M1** - Bootstrap проекта, health checks, миграции
-- **M2** - Сервис аутентификации (register/login/refresh/logout)
-- **M3** - Ядро чата (create/list чаты, сообщения, пагинация)
-- **M4** - WebSocket в реальном времени с фанаутом
-- **M5** - Обработка медиа и публичный API
-- **M6** - Укрепление безопасности и производительность
-
-Подробные спецификации майлстоунов в `mwp.md`.
+- user-facing response texts должны жить в `strings/`, а не в хардкоде transport-логики
+- edge deployment assumptions синхронизированы с `combox-edge`
+- system-bot и bot-token слой уже есть; новые moderation/collectible flows нужно строить поверх этих примитивов, а не дублировать их
 
 ## Лицензия
 
@@ -281,5 +267,5 @@ TODO: Добавить endpoint Prometheus метрик.
 
 ## Автор
 
-[Ernela](https://github.com/Ernous) - Разработчик;
+[Ernela](https://github.com/Ernous) - Разработчица;
 [D7TUN6](https://github.com/D7TUN6) - Идея, разработчик

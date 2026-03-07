@@ -117,5 +117,5 @@ A backend task is done only if:
 - feature implemented by contract
 - tests added/updated
 - metrics/logging included
-- docs updated (`rules.md`/`mwp.md`/API docs)
+- docs updated (`rules.md`/README/API docs)
 - migration and rollback path documented (if schema changed)

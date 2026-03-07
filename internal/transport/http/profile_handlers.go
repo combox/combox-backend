@@ -15,6 +15,25 @@ type profileUpdateRequest struct {
 	BirthDate      *string `json:"birth_date"`
 	AvatarDataURL  *string `json:"avatar_data_url"`
 	AvatarGradient *string `json:"avatar_gradient"`
+	SessionIdleTTLSeconds *int64 `json:"session_idle_ttl_seconds"`
+}
+
+type profilePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+func userIDFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/users/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	id := strings.TrimSpace(strings.TrimPrefix(path, prefix))
+	if id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	return id, true
 }
 
 type emailCodeRequest struct {
@@ -68,12 +87,91 @@ func newProfileHandler(auth AuthService, i18n Translator, defaultLocale string) 
 			AvatarGradient: authsvc.OptionalString{Set: req.AvatarGradient != nil, Value: req.AvatarGradient},
 		}
 
-		user, err := auth.UpdateProfile(r.Context(), input)
+		hasProfileFields := req.Username != nil || req.FirstName != nil || req.LastName != nil || req.BirthDate != nil || req.AvatarDataURL != nil || req.AvatarGradient != nil
+		var user authsvc.User
+		var err error
+		if hasProfileFields {
+			user, err = auth.UpdateProfile(r.Context(), input)
+			if err != nil {
+				writeAuthServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+		}
+		if req.SessionIdleTTLSeconds != nil {
+			user, err = auth.UpdateSessionIdleTTL(r.Context(), userID, req.SessionIdleTTLSeconds)
+			if err != nil {
+				writeAuthServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+		}
+		if !hasProfileFields && req.SessionIdleTTLSeconds == nil {
+			writeAPIError(w, r, http.StatusBadRequest, "invalid_argument", "error.request.invalid_input", nil, i18n, defaultLocale)
+			return
+		}
+		if user.ID == "" {
+			user, err = auth.GetProfile(r.Context(), userID)
+			if err != nil {
+				writeAuthServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+		}
+
+		locale := requestLocale(r, defaultLocale)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message": i18n.Translate(locale, "status.ok"),
+			"user":    mapAuthUser(user),
+		})
+	}
+}
+
+func newProfilePasswordHandler(auth AuthService, i18n Translator, defaultLocale string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, r, i18n, defaultLocale)
+			return
+		}
+		userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
+		if userID == "" {
+			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.auth.missing_user_context", nil, i18n, defaultLocale)
+			return
+		}
+		var req profilePasswordRequest
+		if err := decodeJSON(r, &req); err != nil {
+			writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+			return
+		}
+		if err := auth.ChangePassword(r.Context(), userID, req.CurrentPassword, req.NewPassword); err != nil {
+			writeAuthServiceError(w, r, err, i18n, defaultLocale)
+			return
+		}
+		locale := requestLocale(r, defaultLocale)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message": i18n.Translate(locale, "status.ok"),
+		})
+	}
+}
+
+func newUserByIDHandler(auth AuthService, i18n Translator, defaultLocale string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, r, i18n, defaultLocale)
+			return
+		}
+		requesterID := strings.TrimSpace(r.Header.Get("X-User-ID"))
+		if requesterID == "" {
+			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.auth.missing_user_context", nil, i18n, defaultLocale)
+			return
+		}
+		targetID, ok := userIDFromPath(r.URL.Path)
+		if !ok {
+			writeAPIError(w, r, http.StatusNotFound, "not_found", "error.request.not_found", nil, i18n, defaultLocale)
+			return
+		}
+		user, err := auth.GetProfile(r.Context(), targetID)
 		if err != nil {
 			writeAuthServiceError(w, r, err, i18n, defaultLocale)
 			return
 		}
-
 		locale := requestLocale(r, defaultLocale)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"message": i18n.Translate(locale, "status.ok"),

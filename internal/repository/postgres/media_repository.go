@@ -137,6 +137,69 @@ func (r *MediaRepository) GetAttachment(ctx context.Context, id string) (media.A
 	return out, nil
 }
 
+func (r *MediaRepository) ListAttachmentsMissingMeta(ctx context.Context, limit int) ([]media.Attachment, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+	const q = `
+		SELECT id::text, user_id::text, filename, mime_type, kind, variant, is_client_compressed,
+			size_bytes, width, height, duration_ms,
+			bucket, object_key, upload_type, upload_id,
+			processing_status, processing_error, preview_object_key, hls_master_object_key, processed_at,
+			created_at, updated_at
+		FROM attachments
+		WHERE (width IS NULL OR height IS NULL)
+		   OR ((kind = 'video' OR kind = 'audio') AND duration_ms IS NULL)
+		ORDER BY created_at ASC
+		LIMIT $1
+	`
+
+	rows, err := r.client.pool.Query(ctx, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]media.Attachment, 0, limit)
+	for rows.Next() {
+		var out media.Attachment
+		if err := rows.Scan(
+			&out.ID,
+			&out.UserID,
+			&out.Filename,
+			&out.MimeType,
+			&out.Kind,
+			&out.Variant,
+			&out.IsClientCompressed,
+			&out.SizeBytes,
+			&out.Width,
+			&out.Height,
+			&out.DurationMS,
+			&out.Bucket,
+			&out.ObjectKey,
+			&out.UploadType,
+			&out.UploadID,
+			&out.ProcessingStatus,
+			&out.ProcessingError,
+			&out.PreviewObjectKey,
+			&out.HLSMasterObjectKey,
+			&out.ProcessedAt,
+			&out.CreatedAt,
+			&out.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, out)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 func (r *MediaRepository) CanUserAccessAttachment(ctx context.Context, userID, attachmentID string) (bool, error) {
 	const q = `
 		SELECT EXISTS (
@@ -164,6 +227,19 @@ func (r *MediaRepository) SetAttachmentUploadID(ctx context.Context, id string, 
 		WHERE id = $1::uuid
 	`
 	_, err := r.client.pool.Exec(ctx, q, strings.TrimSpace(id), strings.TrimSpace(uploadID))
+	return err
+}
+
+func (r *MediaRepository) SetAttachmentMeta(ctx context.Context, id string, width *int, height *int, durationMS *int) error {
+	const q = `
+		UPDATE attachments
+		SET width = $2,
+		    height = $3,
+		    duration_ms = $4,
+		    updated_at = NOW()
+		WHERE id = $1::uuid
+	`
+	_, err := r.client.pool.Exec(ctx, q, strings.TrimSpace(id), width, height, durationMS)
 	return err
 }
 

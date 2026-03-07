@@ -46,13 +46,14 @@ type UserMessageCreatedEvent struct {
 }
 
 type MessageStatusEvent struct {
-	Type      string    `json:"type"`
-	MessageID string    `json:"message_id"`
-	ChatID    string    `json:"chat_id"`
-	UserID    string    `json:"user_id"`
-	DeviceID  string    `json:"device_id,omitempty"`
-	Status    string    `json:"status"`
-	At        time.Time `json:"at"`
+	Type            string    `json:"type"`
+	MessageID       string    `json:"message_id"`
+	ChatID          string    `json:"chat_id"`
+	UserID          string    `json:"user_id"`
+	RecipientUserID string    `json:"recipient_user_id,omitempty"`
+	DeviceID        string    `json:"device_id,omitempty"`
+	Status          string    `json:"status"`
+	At              time.Time `json:"at"`
 }
 
 type MessageUpdatedEvent struct {
@@ -173,7 +174,11 @@ func (p *EventPublisher) PublishMessageStatus(ctx context.Context, ev MessageSta
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
-	return p.c.Client().Publish(ctx, userChannel(ev.UserID), payload).Err()
+	recipientID := ev.RecipientUserID
+	if recipientID == "" {
+		recipientID = ev.UserID
+	}
+	return p.c.Client().Publish(ctx, userChannel(recipientID), payload).Err()
 }
 
 func (p *EventPublisher) PublishMessageUpdated(ctx context.Context, ev MessageUpdatedEvent) error {

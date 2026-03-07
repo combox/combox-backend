@@ -95,6 +95,7 @@ type UserRepository interface {
 	FindByID(ctx context.Context, userID string) (User, error)
 	FindByLogin(ctx context.Context, login string) (User, error)
 	UpdateSessionIdleTTL(ctx context.Context, userID string, sessionIdleTTLSeconds *int64) error
+	UpdatePasswordHash(ctx context.Context, userID, passwordHash string) error
 	UpdateProfile(ctx context.Context, input UpdateProfileInput) (User, error)
 	UpdateEmail(ctx context.Context, userID, email string) (User, error)
 }
@@ -718,6 +719,110 @@ func (s *Service) UpdateEmail(ctx context.Context, userID, email string) (User, 
 	}
 	s.resolveAvatarURL(ctx, &user)
 	return user, nil
+}
+
+func (s *Service) UpdateSessionIdleTTL(ctx context.Context, userID string, sessionIdleTTLSeconds *int64) (User, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return User{}, &Error{
+			Code:       CodeInvalidArgument,
+			MessageKey: "error.auth.invalid_input",
+		}
+	}
+	if sessionIdleTTLSeconds != nil && *sessionIdleTTLSeconds <= 0 {
+		return User{}, &Error{
+			Code:       CodeInvalidArgument,
+			MessageKey: "error.auth.invalid_input",
+		}
+	}
+	if err := s.users.UpdateSessionIdleTTL(ctx, userID, sessionIdleTTLSeconds); err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return User{}, &Error{
+				Code:       CodeUnauthorized,
+				MessageKey: "error.auth.invalid_credentials",
+				Cause:      err,
+			}
+		}
+		return User{}, &Error{
+			Code:       CodeInternal,
+			MessageKey: "error.internal",
+			Cause:      err,
+		}
+	}
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return User{}, &Error{
+				Code:       CodeUnauthorized,
+				MessageKey: "error.auth.invalid_credentials",
+				Cause:      err,
+			}
+		}
+		return User{}, &Error{
+			Code:       CodeInternal,
+			MessageKey: "error.internal",
+			Cause:      err,
+		}
+	}
+	s.resolveAvatarURL(ctx, &user)
+	return user, nil
+}
+
+func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
+	userID = strings.TrimSpace(userID)
+	currentPassword = strings.TrimSpace(currentPassword)
+	newPassword = strings.TrimSpace(newPassword)
+	if userID == "" || currentPassword == "" || newPassword == "" || len(newPassword) < 8 {
+		return &Error{
+			Code:       CodeInvalidArgument,
+			MessageKey: "error.auth.invalid_input",
+		}
+	}
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return &Error{
+				Code:       CodeUnauthorized,
+				MessageKey: "error.auth.invalid_credentials",
+				Cause:      err,
+			}
+		}
+		return &Error{
+			Code:       CodeInternal,
+			MessageKey: "error.internal",
+			Cause:      err,
+		}
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+		return &Error{
+			Code:       CodeInvalidCredential,
+			MessageKey: "error.auth.invalid_credentials",
+			Cause:      err,
+		}
+	}
+	passwordHashBytes, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return &Error{
+			Code:       CodeInternal,
+			MessageKey: "error.internal",
+			Cause:      err,
+		}
+	}
+	if err := s.users.UpdatePasswordHash(ctx, userID, string(passwordHashBytes)); err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return &Error{
+				Code:       CodeUnauthorized,
+				MessageKey: "error.auth.invalid_credentials",
+				Cause:      err,
+			}
+		}
+		return &Error{
+			Code:       CodeInternal,
+			MessageKey: "error.internal",
+			Cause:      err,
+		}
+	}
+	return nil
 }
 
 func (s *Service) issueSessionTokens(ctx context.Context, userID, userAgent, ipAddress string, idleTTL time.Duration) (Tokens, error) {
