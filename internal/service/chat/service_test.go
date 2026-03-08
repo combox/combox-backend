@@ -9,10 +9,11 @@ import (
 )
 
 type memChatRepo struct {
-	chats    []Chat
-	members  map[string]map[string]bool
-	roles    map[string]map[string]string
-	failList bool
+	chats       []Chat
+	members     map[string]map[string]bool
+	roles       map[string]map[string]string
+	inviteLinks []ChatInviteLink
+	failList    bool
 }
 
 func (m *memChatRepo) CreateChat(_ context.Context, title string, memberIDs []string, creatorID string, chatType string) (Chat, error) {
@@ -25,13 +26,14 @@ func (m *memChatRepo) CreateChat(_ context.Context, title string, memberIDs []st
 		kind = "direct"
 	}
 	created := Chat{
-		ID:        "chat-1",
-		Title:     title,
-		IsDirect:  isDirect,
-		Type:      chatType,
-		Kind:      kind,
-		BotID:     nil,
-		CreatedAt: time.Now().UTC(),
+		ID:              "chat-1",
+		Title:           title,
+		IsDirect:        isDirect,
+		Type:            chatType,
+		Kind:            kind,
+		CommentsEnabled: true,
+		BotID:           nil,
+		CreatedAt:       time.Now().UTC(),
 	}
 	m.chats = append(m.chats, created)
 	if m.members == nil {
@@ -95,14 +97,15 @@ func (m *memChatRepo) CreateChannel(_ context.Context, parentChatID, title, chan
 		m.roles = map[string]map[string]string{}
 	}
 	created := Chat{
-		ID:           "channel-1",
-		Title:        title,
-		IsDirect:     false,
-		Type:         ChatTypeStandard,
-		Kind:         "channel",
-		ParentChatID: &parentChatID,
-		ChannelType:  &channelType,
-		CreatedAt:    time.Now().UTC(),
+		ID:              "channel-1",
+		Title:           title,
+		IsDirect:        false,
+		Type:            ChatTypeStandard,
+		Kind:            "channel",
+		ParentChatID:    &parentChatID,
+		ChannelType:     &channelType,
+		CommentsEnabled: true,
+		CreatedAt:       time.Now().UTC(),
 	}
 	m.chats = append(m.chats, created)
 	m.members[created.ID] = map[string]bool{}
@@ -114,6 +117,32 @@ func (m *memChatRepo) CreateChannel(_ context.Context, parentChatID, title, chan
 		m.members[created.ID][userID] = true
 		m.roles[created.ID][userID] = m.roles[parentChatID][userID]
 	}
+	return created, nil
+}
+
+func (m *memChatRepo) CreatePublicChannel(_ context.Context, title, publicSlug, creatorID string, isPublic bool) (Chat, error) {
+	if m.members == nil {
+		m.members = map[string]map[string]bool{}
+	}
+	if m.roles == nil {
+		m.roles = map[string]map[string]string{}
+	}
+	created := Chat{
+		ID:              "public-channel-1",
+		Title:           title,
+		IsDirect:        false,
+		Type:            ChatTypeStandard,
+		Kind:            "public_channel",
+		IsPublic:        isPublic,
+		CommentsEnabled: true,
+		CreatedAt:       time.Now().UTC(),
+	}
+	if strings.TrimSpace(publicSlug) != "" {
+		created.PublicSlug = &publicSlug
+	}
+	m.chats = append(m.chats, created)
+	m.members[created.ID] = map[string]bool{creatorID: true}
+	m.roles[created.ID] = map[string]string{creatorID: "owner"}
 	return created, nil
 }
 
@@ -179,9 +208,74 @@ func (m *memChatRepo) UpdateChat(_ context.Context, input UpdateChatInput) (Chat
 		if input.AvatarGradient.Set {
 			m.chats[i].AvatarBg = input.AvatarGradient.Value
 		}
+		if input.CommentsEnabled.Set {
+			m.chats[i].CommentsEnabled = input.CommentsEnabled.Value
+		}
+		if input.IsPublic.Set {
+			m.chats[i].IsPublic = input.IsPublic.Value
+		}
+		if input.PublicSlug.Set {
+			m.chats[i].PublicSlug = input.PublicSlug.Value
+		}
 		return m.chats[i], nil
 	}
 	return Chat{}, ErrChatNotFound
+}
+
+func (m *memChatRepo) ListChatInviteLinks(_ context.Context, chatID string) ([]ChatInviteLink, error) {
+	out := make([]ChatInviteLink, 0)
+	for _, item := range m.inviteLinks {
+		if item.ChatID == chatID {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
+func (m *memChatRepo) CreateChatInviteLink(_ context.Context, chatID, createdBy, title string, isPrimary bool) (ChatInviteLink, error) {
+	var titlePtr *string
+	if strings.TrimSpace(title) != "" {
+		trimmed := strings.TrimSpace(title)
+		titlePtr = &trimmed
+	}
+	item := ChatInviteLink{
+		ID:        "link-" + strings.TrimSpace(chatID) + "-" + time.Now().UTC().Format("150405.000"),
+		ChatID:    chatID,
+		CreatedBy: createdBy,
+		Token:     "tok-" + strings.TrimSpace(chatID),
+		Title:     titlePtr,
+		IsPrimary: isPrimary,
+		UseCount:  0,
+		CreatedAt: time.Now().UTC(),
+	}
+	if isPrimary {
+		for i := range m.inviteLinks {
+			if m.inviteLinks[i].ChatID == chatID {
+				m.inviteLinks[i].IsPrimary = false
+			}
+		}
+	}
+	m.inviteLinks = append(m.inviteLinks, item)
+	return item, nil
+}
+
+func (m *memChatRepo) GetChatInviteLinkByToken(_ context.Context, token string) (ChatInviteLink, error) {
+	for _, item := range m.inviteLinks {
+		if item.Token == token {
+			return item, nil
+		}
+	}
+	return ChatInviteLink{}, ErrChatNotFound
+}
+
+func (m *memChatRepo) IncrementChatInviteLinkUse(_ context.Context, linkID string) error {
+	for i := range m.inviteLinks {
+		if m.inviteLinks[i].ID == linkID {
+			m.inviteLinks[i].UseCount++
+			return nil
+		}
+	}
+	return ErrChatNotFound
 }
 
 func (m *memChatRepo) ListChatMemberIDs(_ context.Context, chatID string) ([]string, error) {
@@ -196,7 +290,7 @@ func (m *memChatRepo) ListChatMemberIDs(_ context.Context, chatID string) ([]str
 	return out, nil
 }
 
-func (m *memChatRepo) ListChatMembers(_ context.Context, chatID string) ([]ChatMember, error) {
+func (m *memChatRepo) ListChatMembers(_ context.Context, chatID string, includeBanned bool) ([]ChatMember, error) {
 	set, ok := m.members[chatID]
 	if !ok {
 		return nil, ErrChatNotFound
@@ -206,9 +300,13 @@ func (m *memChatRepo) ListChatMembers(_ context.Context, chatID string) ([]ChatM
 		if !isMember {
 			continue
 		}
+		role := m.roles[chatID][userID]
+		if !includeBanned && strings.EqualFold(role, "banned") {
+			continue
+		}
 		out = append(out, ChatMember{
 			UserID: userID,
-			Role:   m.roles[chatID][userID],
+			Role:   role,
 		})
 	}
 	return out, nil
@@ -356,7 +454,7 @@ func (m *memMsgRepo) UpsertMessageStatus(_ context.Context, chatID, messageID, u
 	}, nil
 }
 
-func (m *memMsgRepo) UpdateMessageContent(_ context.Context, chatID, messageID, editorUserID, newContent string) (Message, error) {
+func (m *memMsgRepo) UpdateMessageContent(_ context.Context, chatID, messageID, editorUserID, newContent string, _ []string, _ bool) (Message, error) {
 	now := time.Now().UTC()
 	msg := Message{
 		ID:        messageID,
@@ -374,10 +472,10 @@ func (m *memMsgRepo) GetMessageMeta(_ context.Context, messageID string) (Messag
 	if strings.TrimSpace(messageID) == "" {
 		return MessageMeta{}, ErrMessageNotFound
 	}
-	return MessageMeta{ID: messageID, ChatID: "chat-1", UserID: "u1", IsE2E: false}, nil
+	return MessageMeta{ID: messageID, ChatID: "chat-1", UserID: "u1", ReplyToMessageID: "", IsE2E: false}, nil
 }
 
-func (m *memMsgRepo) SoftDeleteMessage(_ context.Context, _ string, _ string, _ string) error {
+func (m *memMsgRepo) SoftDeleteMessage(_ context.Context, _ string, _ string, _ string, _ bool) error {
 	return nil
 }
 

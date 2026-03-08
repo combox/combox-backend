@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"strings"
 )
 
@@ -14,13 +15,50 @@ func canEditChatByRole(role string) bool {
 	}
 }
 
+func (s *Service) GetChat(ctx context.Context, userID, chatID string) (Chat, error) {
+	userID = strings.TrimSpace(userID)
+	chatID = strings.TrimSpace(chatID)
+	if userID == "" || chatID == "" {
+		return Chat{}, invalidArg("error.chat.invalid_input")
+	}
+
+	target, err := s.chats.GetChat(ctx, chatID)
+	if err != nil {
+		return Chat{}, mapChatOrMessageRepoError(err)
+	}
+
+	if strings.TrimSpace(strings.ToLower(target.Kind)) == "public_channel" && target.IsPublic {
+		role, roleErr := s.chats.GetChatMemberRole(ctx, chatID, userID)
+		switch {
+		case roleErr == nil:
+			if strings.EqualFold(role, "banned") {
+				return Chat{}, forbidden("error.chat.forbidden")
+			}
+			roleCopy := role
+			target.ViewerRole = &roleCopy
+		case errors.Is(roleErr, ErrChatNotFound):
+			target.ViewerRole = nil
+		default:
+			return Chat{}, internal(roleErr)
+		}
+		target.AvatarURL = s.resolveAvatarURL(ctx, target.AvatarURL)
+		return target, nil
+	}
+
+	if err := s.ensureChatMember(ctx, chatID, userID); err != nil {
+		return Chat{}, err
+	}
+	target.AvatarURL = s.resolveAvatarURL(ctx, target.AvatarURL)
+	return target, nil
+}
+
 func (s *Service) UpdateChat(ctx context.Context, input UpdateChatInput) (Chat, error) {
 	userID := strings.TrimSpace(input.UserID)
 	chatID := strings.TrimSpace(input.ChatID)
 	if userID == "" || chatID == "" {
 		return Chat{}, invalidArg("error.chat.invalid_input")
 	}
-	if !input.Title.Set && !input.AvatarDataURL.Set && !input.AvatarGradient.Set {
+	if !input.Title.Set && !input.AvatarDataURL.Set && !input.AvatarGradient.Set && !input.CommentsEnabled.Set && !input.IsPublic.Set && !input.PublicSlug.Set {
 		return Chat{}, invalidArg("error.chat.invalid_input")
 	}
 
@@ -72,6 +110,42 @@ func (s *Service) UpdateChat(ctx context.Context, input UpdateChatInput) (Chat, 
 			input.AvatarGradient.Value = &value
 		}
 	}
+	if target.Kind == "public_channel" {
+		if input.IsPublic.Set {
+			if !input.IsPublic.Value {
+				input.PublicSlug = OptionalString{Set: true, Value: nil}
+			} else if !input.PublicSlug.Set {
+				existingSlug := normalizePublicSlug(derefString(target.PublicSlug))
+				if existingSlug == "" {
+					return Chat{}, invalidArg("error.chat.invalid_input")
+				}
+				input.PublicSlug = OptionalString{Set: true, Value: &existingSlug}
+			}
+		}
+		if input.PublicSlug.Set {
+			if input.PublicSlug.Value != nil {
+				value := normalizePublicSlug(*input.PublicSlug.Value)
+				if value == "" {
+					input.PublicSlug.Value = nil
+				} else {
+					input.PublicSlug.Value = &value
+				}
+			}
+			nextPublic := target.IsPublic
+			if input.IsPublic.Set {
+				nextPublic = input.IsPublic.Value
+			}
+			if nextPublic && input.PublicSlug.Value == nil {
+				return Chat{}, invalidArg("error.chat.invalid_input")
+			}
+			if !nextPublic {
+				input.PublicSlug.Value = nil
+			}
+		}
+	} else {
+		input.IsPublic = OptionalBool{}
+		input.PublicSlug = OptionalString{}
+	}
 
 	updated, err := s.chats.UpdateChat(ctx, input)
 	if err != nil {
@@ -79,4 +153,11 @@ func (s *Service) UpdateChat(ctx context.Context, input UpdateChatInput) (Chat, 
 	}
 	updated.AvatarURL = s.resolveAvatarURL(ctx, updated.AvatarURL)
 	return updated, nil
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
 }

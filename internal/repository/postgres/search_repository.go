@@ -133,10 +133,12 @@ func (r *SearchRepository) SearchPublicChats(ctx context.Context, q string, limi
 			SELECT id::text,
 			       title,
 			       chat_kind,
-			       public_slug
+			       public_slug,
+			       avatar_data_url,
+			       avatar_gradient
 			FROM chats
 			WHERE is_public = TRUE
-			  AND chat_kind IN ('group', 'channel')
+			  AND chat_kind IN ('group', 'channel', 'public_channel')
 			  AND LOWER(COALESCE(public_slug, '')) LIKE $1
 			ORDER BY created_at DESC
 			LIMIT $2
@@ -151,7 +153,7 @@ func (r *SearchRepository) SearchPublicChats(ctx context.Context, q string, limi
 		out := make([]searchsvc.ChatResult, 0)
 		for rows.Next() {
 			var item searchsvc.ChatResult
-			if err := rows.Scan(&item.ID, &item.Title, &item.Kind, &item.PublicSlug); err != nil {
+			if err := rows.Scan(&item.ID, &item.Title, &item.Kind, &item.PublicSlug, &item.AvatarDataURL, &item.AvatarGradient); err != nil {
 				return nil, err
 			}
 			out = append(out, item)
@@ -173,10 +175,12 @@ func (r *SearchRepository) SearchPublicChats(ctx context.Context, q string, limi
 		SELECT id::text,
 		       title,
 		       chat_kind,
-		       public_slug
+		       public_slug,
+		       avatar_data_url,
+		       avatar_gradient
 		FROM chats
 		WHERE is_public = TRUE
-		  AND chat_kind IN ('group', 'channel')
+		  AND chat_kind IN ('group', 'channel', 'public_channel')
 		  AND (
 		       LOWER(title) LIKE $1
 		       OR LOWER(COALESCE(public_slug, '')) LIKE $1
@@ -194,7 +198,7 @@ func (r *SearchRepository) SearchPublicChats(ctx context.Context, q string, limi
 	out := make([]searchsvc.ChatResult, 0)
 	for rows.Next() {
 		var item searchsvc.ChatResult
-		if err := rows.Scan(&item.ID, &item.Title, &item.Kind, &item.PublicSlug); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.Kind, &item.PublicSlug, &item.AvatarDataURL, &item.AvatarGradient); err != nil {
 			return nil, err
 		}
 		out = append(out, item)

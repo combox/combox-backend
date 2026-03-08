@@ -472,6 +472,21 @@ func (stubChatService) CreateChannel(context.Context, chatsvc.CreateChannelInput
 	return chatsvc.Chat{ID: "channel-1", Title: "General", Type: "standard", Kind: "channel"}, nil
 }
 
+func (stubChatService) CreatePublicChannel(context.Context, chatsvc.CreatePublicChannelInput) (chatsvc.Chat, error) {
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
+}
+
+func (stubChatService) OpenDirectChat(_ context.Context, input chatsvc.OpenDirectChatInput) (chatsvc.Chat, error) {
+	return chatsvc.Chat{
+		ID:         "direct-1",
+		Title:      input.RecipientUserID,
+		Type:       "standard",
+		Kind:       "direct",
+		IsDirect:   true,
+		PeerUserID: &input.RecipientUserID,
+	}, nil
+}
+
 func (stubChatService) DeleteChannel(context.Context, chatsvc.DeleteChannelInput) error {
 	return nil
 }
@@ -484,11 +499,15 @@ func (stubChatService) UpdateChat(_ context.Context, input chatsvc.UpdateChatInp
 	return chatsvc.Chat{ID: input.ChatID, Title: title, Type: "standard", Kind: "group"}, nil
 }
 
+func (stubChatService) GetChat(_ context.Context, _ string, chatID string) (chatsvc.Chat, error) {
+	return chatsvc.Chat{ID: chatID, Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
+}
+
 func (stubChatService) ListChannels(context.Context, string, string) ([]chatsvc.Chat, error) {
 	return []chatsvc.Chat{{ID: "chat-2", Title: "General / text", Type: "standard", Kind: "channel"}}, nil
 }
 
-func (stubChatService) ListMembers(context.Context, string, string) ([]chatsvc.ChatMember, error) {
+func (stubChatService) ListMembers(context.Context, string, string, bool) ([]chatsvc.ChatMember, error) {
 	return []chatsvc.ChatMember{
 		{UserID: "u1", Role: "owner"},
 		{UserID: "u2", Role: "member"},
@@ -516,8 +535,44 @@ func (stubChatService) RemoveMember(context.Context, string, string, string) ([]
 	}, nil
 }
 
+func (stubChatService) SubscribePublicChannel(context.Context, string, string) (chatsvc.Chat, error) {
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
+}
+
+func (stubChatService) UnsubscribePublicChannel(context.Context, string, string) error {
+	return nil
+}
+
 func (stubChatService) AcceptInvite(context.Context, string, string) (chatsvc.Chat, error) {
 	return chatsvc.Chat{ID: "chat-1", Title: "General", Type: "standard", Kind: "group"}, nil
+}
+
+func (stubChatService) ListInviteLinks(context.Context, string, string) ([]chatsvc.ChatInviteLink, error) {
+	return []chatsvc.ChatInviteLink{{
+		ID:        "link-1",
+		ChatID:    "public-channel-1",
+		CreatedBy: "u1",
+		Token:     "tok-1",
+		IsPrimary: true,
+		UseCount:  0,
+		CreatedAt: time.Now().UTC(),
+	}}, nil
+}
+
+func (stubChatService) CreateInviteLink(context.Context, chatsvc.CreateInviteLinkInput) (chatsvc.ChatInviteLink, error) {
+	return chatsvc.ChatInviteLink{
+		ID:        "link-1",
+		ChatID:    "public-channel-1",
+		CreatedBy: "u1",
+		Token:     "tok-1",
+		IsPrimary: false,
+		UseCount:  0,
+		CreatedAt: time.Now().UTC(),
+	}, nil
+}
+
+func (stubChatService) AcceptInviteLink(context.Context, string, string) (chatsvc.Chat, error) {
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) LeaveChat(context.Context, string, string) error {

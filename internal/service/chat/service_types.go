@@ -43,12 +43,14 @@ type MessageMeta struct {
 	ID          string
 	ChatID      string
 	UserID      string
+	ReplyToMessageID string
 	SenderBotID *string
 	IsE2E       bool
 }
 
 type MessageReaction struct {
 	Emoji   string   `json:"emoji"`
+	Count   int      `json:"count"`
 	UserIDs []string `json:"user_ids"`
 }
 
@@ -58,16 +60,33 @@ type Chat struct {
 	IsDirect           bool      `json:"is_direct"`
 	Type               string    `json:"type"`
 	Kind               string    `json:"kind"`
+	IsPublic           bool      `json:"is_public"`
+	PublicSlug         *string   `json:"public_slug,omitempty"`
 	ParentChatID       *string   `json:"parent_chat_id,omitempty"`
 	ChannelType        *string   `json:"channel_type,omitempty"`
 	TopicNumber        *int      `json:"topic_number,omitempty"`
 	IsGeneral          *bool     `json:"is_general,omitempty"`
 	BotID              *string   `json:"bot_id,omitempty"`
 	PeerUserID         *string   `json:"peer_user_id,omitempty"`
+	ViewerRole         *string   `json:"viewer_role,omitempty"`
+	SubscriberCount    *int      `json:"subscriber_count,omitempty"`
+	CommentsEnabled    bool      `json:"comments_enabled"`
 	AvatarURL          *string   `json:"avatar_data_url,omitempty"`
 	AvatarBg           *string   `json:"avatar_gradient,omitempty"`
 	LastMessagePreview *string   `json:"last_message_preview,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
+}
+
+type ChatInviteLink struct {
+	ID        string     `json:"id"`
+	ChatID    string     `json:"chat_id"`
+	CreatedBy string     `json:"created_by"`
+	Token     string     `json:"token"`
+	Title     *string    `json:"title,omitempty"`
+	IsPrimary bool       `json:"is_primary"`
+	UseCount  int        `json:"use_count"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 type ChatMember struct {
@@ -132,6 +151,13 @@ type CreateChannelInput struct {
 	ChannelType string
 }
 
+type CreatePublicChannelInput struct {
+	UserID     string
+	Title      string
+	PublicSlug string
+	IsPublic   bool
+}
+
 type DeleteChannelInput struct {
 	UserID        string
 	GroupChatID   string
@@ -143,12 +169,20 @@ type OptionalString struct {
 	Value *string
 }
 
+type OptionalBool struct {
+	Set   bool
+	Value bool
+}
+
 type UpdateChatInput struct {
 	UserID         string
 	ChatID         string
 	Title          OptionalString
 	AvatarDataURL  OptionalString
 	AvatarGradient OptionalString
+	CommentsEnabled OptionalBool
+	IsPublic       OptionalBool
+	PublicSlug     OptionalString
 }
 
 type CreateMessageInput struct {
@@ -178,16 +212,32 @@ type CreateDirectMessageInput struct {
 	AttachmentIDs    []string
 }
 
+type OpenDirectChatInput struct {
+	UserID          string
+	RecipientUserID string
+}
+
+type CreateInviteLinkInput struct {
+	UserID string
+	ChatID string
+	Title  string
+}
+
 type ChatRepository interface {
 	CreateChat(ctx context.Context, title string, memberIDs []string, creatorID string, chatType string) (Chat, error)
 	CreateChannel(ctx context.Context, parentChatID, title, channelType, creatorID string) (Chat, error)
+	CreatePublicChannel(ctx context.Context, title, publicSlug, creatorID string, isPublic bool) (Chat, error)
 	DeleteChannel(ctx context.Context, parentChatID, channelChatID string) error
 	FindDirectChatByMembers(ctx context.Context, userAID, userBID, chatType string) (Chat, bool, error)
 	ListChatsByUser(ctx context.Context, userID string) ([]Chat, error)
 	ListChannelsByParent(ctx context.Context, parentChatID, userID string) ([]Chat, error)
 	GetChat(ctx context.Context, chatID string) (Chat, error)
 	UpdateChat(ctx context.Context, input UpdateChatInput) (Chat, error)
-	ListChatMembers(ctx context.Context, chatID string) ([]ChatMember, error)
+	ListChatInviteLinks(ctx context.Context, chatID string) ([]ChatInviteLink, error)
+	CreateChatInviteLink(ctx context.Context, chatID, createdBy, title string, isPrimary bool) (ChatInviteLink, error)
+	GetChatInviteLinkByToken(ctx context.Context, token string) (ChatInviteLink, error)
+	IncrementChatInviteLinkUse(ctx context.Context, linkID string) error
+	ListChatMembers(ctx context.Context, chatID string, includeBanned bool) ([]ChatMember, error)
 	AddChatMembers(ctx context.Context, chatID string, memberIDs []string) error
 	UpdateChatMemberRole(ctx context.Context, chatID, userID, role string) error
 	RemoveChatMember(ctx context.Context, chatID, userID string) error
@@ -206,9 +256,9 @@ type MessageRepository interface {
 	ListMessages(ctx context.Context, chatID string, limit int, cursor string) (MessagePage, error)
 	ListMessagesForDevice(ctx context.Context, chatID, deviceID string, limit int, cursor string) (MessagePage, error)
 	UpsertMessageStatus(ctx context.Context, chatID, messageID, userID, status string) (MessageStatus, error)
-	UpdateMessageContent(ctx context.Context, chatID, messageID, editorUserID, newContent string) (Message, error)
+	UpdateMessageContent(ctx context.Context, chatID, messageID, editorUserID, newContent string, attachmentIDs []string, allowForeign bool) (Message, error)
 	GetMessageMeta(ctx context.Context, messageID string) (MessageMeta, error)
-	SoftDeleteMessage(ctx context.Context, chatID, messageID, deleterUserID string) error
+	SoftDeleteMessage(ctx context.Context, chatID, messageID, deleterUserID string, allowForeign bool) error
 	ToggleMessageReaction(ctx context.Context, chatID, messageID, userID, emoji string) ([]MessageReaction, string, error)
 }
 
@@ -301,10 +351,11 @@ type MessageDeletedEvent struct {
 }
 
 type EditMessageInput struct {
-	UserID    string
-	ChatID    string
-	MessageID string
-	Content   string
+	UserID        string
+	ChatID        string
+	MessageID     string
+	Content       string
+	AttachmentIDs []string
 }
 
 type ForwardMessageInput struct {

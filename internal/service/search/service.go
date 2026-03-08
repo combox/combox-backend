@@ -24,10 +24,12 @@ type UserResult struct {
 }
 
 type ChatResult struct {
-	ID         string  `json:"id"`
-	Title      string  `json:"title"`
-	Kind       string  `json:"kind"`
-	PublicSlug *string `json:"public_slug,omitempty"`
+	ID             string  `json:"id"`
+	Title          string  `json:"title"`
+	Kind           string  `json:"kind"`
+	PublicSlug     *string `json:"public_slug,omitempty"`
+	AvatarDataURL  *string `json:"avatar_data_url,omitempty"`
+	AvatarGradient *string `json:"avatar_gradient,omitempty"`
 }
 
 type Results struct {
@@ -111,6 +113,18 @@ func (s *Service) resolveUsersAvatars(ctx context.Context, users []UserResult) [
 	return out
 }
 
+func (s *Service) resolveChatsAvatars(ctx context.Context, chats []ChatResult) []ChatResult {
+	if len(chats) == 0 {
+		return chats
+	}
+	out := make([]ChatResult, len(chats))
+	copy(out, chats)
+	for i := range out {
+		out[i].AvatarDataURL = s.resolveAvatarURL(ctx, out[i].AvatarDataURL)
+	}
+	return out
+}
+
 func (s *Service) Search(ctx context.Context, q string, scope string, limit int) (Results, error) {
 	q = strings.TrimSpace(q)
 	scope = strings.TrimSpace(strings.ToLower(scope))
@@ -142,7 +156,7 @@ func (s *Service) Search(ctx context.Context, q string, scope string, limit int)
 		if err != nil {
 			return Results{}, err
 		}
-		out.Chats = items
+		out.Chats = s.resolveChatsAvatars(ctx, items)
 		return out, nil
 	case ScopeAll:
 		users, err := s.repo.SearchUsers(ctx, q, limit)
@@ -154,7 +168,7 @@ func (s *Service) Search(ctx context.Context, q string, scope string, limit int)
 			return Results{}, err
 		}
 		out.Users = s.resolveUsersAvatars(ctx, users)
-		out.Chats = chats
+		out.Chats = s.resolveChatsAvatars(ctx, chats)
 		return out, nil
 	default:
 		users, err := s.repo.SearchUsers(ctx, q, limit)
@@ -166,7 +180,7 @@ func (s *Service) Search(ctx context.Context, q string, scope string, limit int)
 			return Results{}, err
 		}
 		out.Users = s.resolveUsersAvatars(ctx, users)
-		out.Chats = chats
+		out.Chats = s.resolveChatsAvatars(ctx, chats)
 		return out, nil
 	}
 }

@@ -30,8 +30,19 @@ func (s *Service) EditMessage(ctx context.Context, input EditMessageInput) (Mess
 	if chatType != ChatTypeStandard {
 		return Message{}, invalidArg("error.message.edit_not_allowed")
 	}
+	allowForeign := false
+	if strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "public_channel" {
+		role, err := s.chats.GetChatMemberRole(ctx, chatID, userID)
+		if err != nil {
+			return Message{}, internal(err)
+		}
+		if !canPostPublicChannelByRole(role) {
+			return Message{}, forbidden("error.chat.forbidden")
+		}
+		allowForeign = true
+	}
 
-	updated, repoErr := s.messages.UpdateMessageContent(ctx, chatID, messageID, userID, newContent)
+	updated, repoErr := s.messages.UpdateMessageContent(ctx, chatID, messageID, userID, newContent, input.AttachmentIDs, allowForeign)
 	if repoErr != nil {
 		return Message{}, mapChatOrMessageRepoError(repoErr)
 	}
@@ -94,10 +105,11 @@ func (s *Service) EditMessageByID(ctx context.Context, userID, messageID, conten
 	}
 
 	return s.EditMessage(ctx, EditMessageInput{
-		UserID:    userID,
-		ChatID:    meta.ChatID,
-		MessageID: meta.ID,
-		Content:   content,
+		UserID:        userID,
+		ChatID:        meta.ChatID,
+		MessageID:     meta.ID,
+		Content:       content,
+		AttachmentIDs: nil,
 	})
 }
 
@@ -131,8 +143,19 @@ func (s *Service) DeleteMessageByID(ctx context.Context, userID, messageID strin
 	if chatType != ChatTypeStandard {
 		return invalidArg("error.message.edit_not_allowed")
 	}
+	allowForeign := false
+	if strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "public_channel" {
+		role, err := s.chats.GetChatMemberRole(ctx, meta.ChatID, userID)
+		if err != nil {
+			return internal(err)
+		}
+		if !canPostPublicChannelByRole(role) {
+			return forbidden("error.chat.forbidden")
+		}
+		allowForeign = true
+	}
 
-	if err := s.messages.SoftDeleteMessage(ctx, meta.ChatID, meta.ID, userID); err != nil {
+	if err := s.messages.SoftDeleteMessage(ctx, meta.ChatID, meta.ID, userID, allowForeign); err != nil {
 		return mapChatOrMessageRepoError(err)
 	}
 
@@ -221,11 +244,36 @@ func (s *Service) ToggleMessageReactionByID(ctx context.Context, userID, message
 	if err := s.ensureChatMember(ctx, meta.ChatID, userID); err != nil {
 		return nil, "", err
 	}
+	chatMeta, chatErr := s.chats.GetChat(ctx, meta.ChatID)
+	if chatErr != nil {
+		return nil, "", mapChatOrMessageRepoError(chatErr)
+	}
+	if strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "public_channel" {
+		role, roleErr := s.chats.GetChatMemberRole(ctx, meta.ChatID, userID)
+		if roleErr != nil {
+			if errors.Is(roleErr, ErrChatNotFound) {
+				return nil, "", forbidden("error.chat.forbidden")
+			}
+			return nil, "", internal(roleErr)
+		}
+		if !canReactPublicChannelByRole(role) {
+			return nil, "", forbidden("error.chat.forbidden")
+		}
+	}
 
 	reactions, action, err := s.messages.ToggleMessageReaction(ctx, meta.ChatID, meta.ID, userID, emoji)
 	if err != nil {
 		return nil, "", mapChatOrMessageRepoError(err)
 	}
+	sanitized := sanitizeMessageReactionsForViewer(chatMeta, Message{
+		ID:      meta.ID,
+		ChatID:  meta.ChatID,
+		Reactions: reactions,
+	})
+	if strings.TrimSpace(meta.ReplyToMessageID) != "" {
+		sanitized.ReplyToMessageID = &meta.ReplyToMessageID
+	}
+	reactions = sanitized.Reactions
 
 	if s.publisher != nil {
 		members, listErr := s.chats.ListChatMemberIDs(ctx, meta.ChatID)

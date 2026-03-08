@@ -71,7 +71,7 @@ func (s *Service) LeaveChat(ctx context.Context, userID, chatID string) error {
 		return internal(err)
 	}
 	if strings.EqualFold(role, "owner") {
-		members, err := s.chats.ListChatMembers(ctx, chatID)
+		members, err := s.chats.ListChatMembers(ctx, chatID, false)
 		if err != nil {
 			return internal(err)
 		}

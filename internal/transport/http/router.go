@@ -90,9 +90,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.Chat != nil {
 		mux.HandleFunc("/api/private/v1/chats", newChatsHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/chats/direct", newDirectChatHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/chats/direct/messages", newDirectMessageHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/chats/", newChatMessagesHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/messages/", newMessagesByIDHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/public-channels", newPublicChannelsHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/public-channels/", newPublicChannelByIDHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.Search != nil {
 		mux.HandleFunc("/api/private/v1/search", newSearchHandler(deps.Search, deps.I18n, deps.DefaultLocale))
@@ -240,10 +243,17 @@ type SearchService interface {
 type ChatService interface {
 	CreateChat(ctx context.Context, input chat.CreateChatInput) (chat.Chat, error)
 	CreateChannel(ctx context.Context, input chat.CreateChannelInput) (chat.Chat, error)
+	CreatePublicChannel(ctx context.Context, input chat.CreatePublicChannelInput) (chat.Chat, error)
 	DeleteChannel(ctx context.Context, input chat.DeleteChannelInput) error
+	SubscribePublicChannel(ctx context.Context, userID, chatID string) (chat.Chat, error)
+	UnsubscribePublicChannel(ctx context.Context, userID, chatID string) error
+	GetChat(ctx context.Context, userID, chatID string) (chat.Chat, error)
 	UpdateChat(ctx context.Context, input chat.UpdateChatInput) (chat.Chat, error)
+	ListInviteLinks(ctx context.Context, userID, chatID string) ([]chat.ChatInviteLink, error)
+	CreateInviteLink(ctx context.Context, input chat.CreateInviteLinkInput) (chat.ChatInviteLink, error)
+	AcceptInviteLink(ctx context.Context, userID, token string) (chat.Chat, error)
 	ListChannels(ctx context.Context, userID, groupChatID string) ([]chat.Chat, error)
-	ListMembers(ctx context.Context, userID, chatID string) ([]chat.ChatMember, error)
+	ListMembers(ctx context.Context, userID, chatID string, includeBanned bool) ([]chat.ChatMember, error)
 	AddMembers(ctx context.Context, userID, chatID string, memberIDs []string) ([]chat.ChatMember, error)
 	UpdateMemberRole(ctx context.Context, actorUserID, chatID, targetUserID, role string) ([]chat.ChatMember, error)
 	RemoveMember(ctx context.Context, actorUserID, chatID, targetUserID string) ([]chat.ChatMember, error)
@@ -252,6 +262,7 @@ type ChatService interface {
 	ListChats(ctx context.Context, userID string) ([]chat.Chat, error)
 	CreateMessage(ctx context.Context, input chat.CreateMessageInput) (chat.Message, error)
 	CreateDirectMessage(ctx context.Context, input chat.CreateDirectMessageInput) (chat.Message, chat.Chat, error)
+	OpenDirectChat(ctx context.Context, input chat.OpenDirectChatInput) (chat.Chat, error)
 	ListMessages(ctx context.Context, input chat.ListMessagesInput) (chat.MessagePage, error)
 	UpsertMessageStatus(ctx context.Context, input chat.UpsertMessageStatusInput) (chat.MessageStatus, error)
 	EditMessage(ctx context.Context, input chat.EditMessageInput) (chat.Message, error)
