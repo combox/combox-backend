@@ -13,13 +13,13 @@ const (
 )
 
 type UserResult struct {
-	ID            string  `json:"id"`
-	Email         string  `json:"email"`
-	Username      string  `json:"username"`
-	FirstName     string  `json:"first_name"`
-	LastName      *string `json:"last_name,omitempty"`
-	BirthDate     *string `json:"birth_date,omitempty"`
-	AvatarDataURL *string `json:"avatar_data_url,omitempty"`
+	ID             string  `json:"id"`
+	Email          string  `json:"email"`
+	Username       string  `json:"username"`
+	FirstName      string  `json:"first_name"`
+	LastName       *string `json:"last_name,omitempty"`
+	BirthDate      *string `json:"birth_date,omitempty"`
+	AvatarDataURL  *string `json:"avatar_data_url,omitempty"`
 	AvatarGradient *string `json:"avatar_gradient,omitempty"`
 }
 
@@ -43,9 +43,9 @@ type Repository interface {
 }
 
 type Service struct {
-	repo       Repository
-	avatars    AvatarStore
-	avatarTTL  time.Duration
+	repo      Repository
+	avatars   AvatarStore
+	avatarTTL time.Duration
 }
 
 func New(repo Repository) *Service {

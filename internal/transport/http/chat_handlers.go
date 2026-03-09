@@ -603,14 +603,14 @@ func newChatMessagesHandler(chat ChatService, i18n Translator, defaultLocale str
 				return
 			}
 			updated, err := chat.UpdateChat(r.Context(), chatsvc.UpdateChatInput{
-				UserID:         userID,
-				ChatID:         targetChatID,
-				Title:          chatsvc.OptionalString{Set: req.Title != nil, Value: req.Title},
-				AvatarDataURL:  chatsvc.OptionalString{Set: req.AvatarDataURL != nil, Value: req.AvatarDataURL},
-				AvatarGradient: chatsvc.OptionalString{Set: req.AvatarGradient != nil, Value: req.AvatarGradient},
+				UserID:          userID,
+				ChatID:          targetChatID,
+				Title:           chatsvc.OptionalString{Set: req.Title != nil, Value: req.Title},
+				AvatarDataURL:   chatsvc.OptionalString{Set: req.AvatarDataURL != nil, Value: req.AvatarDataURL},
+				AvatarGradient:  chatsvc.OptionalString{Set: req.AvatarGradient != nil, Value: req.AvatarGradient},
 				CommentsEnabled: chatsvc.OptionalBool{Set: req.CommentsEnabled != nil, Value: req.CommentsEnabled != nil && *req.CommentsEnabled},
-				IsPublic:       chatsvc.OptionalBool{Set: req.IsPublic != nil, Value: req.IsPublic != nil && *req.IsPublic},
-				PublicSlug:     chatsvc.OptionalString{Set: req.PublicSlug != nil, Value: req.PublicSlug},
+				IsPublic:        chatsvc.OptionalBool{Set: req.IsPublic != nil, Value: req.IsPublic != nil && *req.IsPublic},
+				PublicSlug:      chatsvc.OptionalString{Set: req.PublicSlug != nil, Value: req.PublicSlug},
 			})
 			if err != nil {
 				writeChatServiceError(w, r, err, i18n, defaultLocale)

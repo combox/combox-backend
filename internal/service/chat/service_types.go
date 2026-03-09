@@ -40,12 +40,12 @@ func (e *Error) Unwrap() error {
 }
 
 type MessageMeta struct {
-	ID          string
-	ChatID      string
-	UserID      string
+	ID               string
+	ChatID           string
+	UserID           string
 	ReplyToMessageID string
-	SenderBotID *string
-	IsE2E       bool
+	SenderBotID      *string
+	IsE2E            bool
 }
 
 type MessageReaction struct {
@@ -175,14 +175,14 @@ type OptionalBool struct {
 }
 
 type UpdateChatInput struct {
-	UserID         string
-	ChatID         string
-	Title          OptionalString
-	AvatarDataURL  OptionalString
-	AvatarGradient OptionalString
+	UserID          string
+	ChatID          string
+	Title           OptionalString
+	AvatarDataURL   OptionalString
+	AvatarGradient  OptionalString
 	CommentsEnabled OptionalBool
-	IsPublic       OptionalBool
-	PublicSlug     OptionalString
+	IsPublic        OptionalBool
+	PublicSlug      OptionalString
 }
 
 type CreateMessageInput struct {
