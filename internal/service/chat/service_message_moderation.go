@@ -266,8 +266,8 @@ func (s *Service) ToggleMessageReactionByID(ctx context.Context, userID, message
 		return nil, "", mapChatOrMessageRepoError(err)
 	}
 	sanitized := sanitizeMessageReactionsForViewer(chatMeta, Message{
-		ID:      meta.ID,
-		ChatID:  meta.ChatID,
+		ID:        meta.ID,
+		ChatID:    meta.ChatID,
 		Reactions: reactions,
 	})
 	if strings.TrimSpace(meta.ReplyToMessageID) != "" {

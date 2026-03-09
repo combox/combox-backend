@@ -13,3 +13,5 @@ coverage/
 Thumbs.db
 .idea/
 .vscode/
+.gocache/
+.gomodcache/
