@@ -26,14 +26,15 @@ func (m *memChatRepo) CreateChat(_ context.Context, title string, memberIDs []st
 		kind = "direct"
 	}
 	created := Chat{
-		ID:              "chat-1",
-		Title:           title,
-		IsDirect:        isDirect,
-		Type:            chatType,
-		Kind:            kind,
-		CommentsEnabled: true,
-		BotID:           nil,
-		CreatedAt:       time.Now().UTC(),
+		ID:               "chat-1",
+		Title:            title,
+		IsDirect:         isDirect,
+		Type:             chatType,
+		Kind:             kind,
+		CommentsEnabled:  true,
+		ReactionsEnabled: true,
+		BotID:            nil,
+		CreatedAt:        time.Now().UTC(),
 	}
 	m.chats = append(m.chats, created)
 	if m.members == nil {
@@ -97,15 +98,16 @@ func (m *memChatRepo) CreateChannel(_ context.Context, parentChatID, title, chan
 		m.roles = map[string]map[string]string{}
 	}
 	created := Chat{
-		ID:              "channel-1",
-		Title:           title,
-		IsDirect:        false,
-		Type:            ChatTypeStandard,
-		Kind:            "channel",
-		ParentChatID:    &parentChatID,
-		ChannelType:     &channelType,
-		CommentsEnabled: true,
-		CreatedAt:       time.Now().UTC(),
+		ID:               "channel-1",
+		Title:            title,
+		IsDirect:         false,
+		Type:             ChatTypeStandard,
+		Kind:             "channel",
+		ParentChatID:     &parentChatID,
+		ChannelType:      &channelType,
+		CommentsEnabled:  true,
+		ReactionsEnabled: true,
+		CreatedAt:        time.Now().UTC(),
 	}
 	m.chats = append(m.chats, created)
 	m.members[created.ID] = map[string]bool{}
@@ -120,7 +122,7 @@ func (m *memChatRepo) CreateChannel(_ context.Context, parentChatID, title, chan
 	return created, nil
 }
 
-func (m *memChatRepo) CreatePublicChannel(_ context.Context, title, publicSlug, creatorID string, isPublic bool) (Chat, error) {
+func (m *memChatRepo) CreateStandaloneChannel(_ context.Context, title, publicSlug, creatorID string, isPublic bool) (Chat, error) {
 	if m.members == nil {
 		m.members = map[string]map[string]bool{}
 	}
@@ -128,14 +130,15 @@ func (m *memChatRepo) CreatePublicChannel(_ context.Context, title, publicSlug, 
 		m.roles = map[string]map[string]string{}
 	}
 	created := Chat{
-		ID:              "public-channel-1",
-		Title:           title,
-		IsDirect:        false,
-		Type:            ChatTypeStandard,
-		Kind:            "public_channel",
-		IsPublic:        isPublic,
-		CommentsEnabled: true,
-		CreatedAt:       time.Now().UTC(),
+		ID:               "public-channel-1",
+		Title:            title,
+		IsDirect:         false,
+		Type:             ChatTypeStandard,
+		Kind:             "standalone_channel",
+		IsPublic:         isPublic,
+		CommentsEnabled:  true,
+		ReactionsEnabled: true,
+		CreatedAt:        time.Now().UTC(),
 	}
 	if strings.TrimSpace(publicSlug) != "" {
 		created.PublicSlug = &publicSlug
@@ -210,6 +213,9 @@ func (m *memChatRepo) UpdateChat(_ context.Context, input UpdateChatInput) (Chat
 		}
 		if input.CommentsEnabled.Set {
 			m.chats[i].CommentsEnabled = input.CommentsEnabled.Value
+		}
+		if input.ReactionsEnabled.Set {
+			m.chats[i].ReactionsEnabled = input.ReactionsEnabled.Value
 		}
 		if input.IsPublic.Set {
 			m.chats[i].IsPublic = input.IsPublic.Value
@@ -372,6 +378,7 @@ func (m *memChatRepo) GetChatMemberRole(_ context.Context, chatID, userID string
 
 type memMsgRepo struct {
 	items []Message
+	metas map[string]MessageMeta
 }
 
 func (m *memMsgRepo) CreateMessage(_ context.Context, chatID, userID, content, _ string) (Message, error) {
@@ -469,6 +476,9 @@ func (m *memMsgRepo) UpdateMessageContent(_ context.Context, chatID, messageID, 
 }
 
 func (m *memMsgRepo) GetMessageMeta(_ context.Context, messageID string) (MessageMeta, error) {
+	if meta, ok := m.metas[messageID]; ok {
+		return meta, nil
+	}
 	if strings.TrimSpace(messageID) == "" {
 		return MessageMeta{}, ErrMessageNotFound
 	}
@@ -547,6 +557,148 @@ func TestCreateMessageForbiddenForNonMember(t *testing.T) {
 		ChatID:  "chat-1",
 		Content: "hello",
 	})
+	if err == nil {
+		t.Fatalf("expected forbidden error")
+	}
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected service error")
+	}
+	if svcErr.Code != CodeForbidden {
+		t.Fatalf("unexpected error code: %s", svcErr.Code)
+	}
+}
+
+func TestCreateMessageAllowsOpenPublicChannelCommentsWithoutSubscription(t *testing.T) {
+	ownerRole := "owner"
+	chatRepo := &memChatRepo{
+		chats: []Chat{{
+			ID:               "public-channel-1",
+			Title:            "News",
+			Type:             ChatTypeStandard,
+			Kind:             "standalone_channel",
+			IsPublic:         true,
+			CommentsEnabled:  true,
+			ReactionsEnabled: true,
+		}},
+		members: map[string]map[string]bool{
+			"public-channel-1": {"owner-1": true},
+		},
+		roles: map[string]map[string]string{
+			"public-channel-1": {"owner-1": ownerRole},
+		},
+	}
+	msgRepo := &memMsgRepo{
+		metas: map[string]MessageMeta{
+			"post-1": {
+				ID:               "post-1",
+				ChatID:           "public-channel-1",
+				UserID:           "owner-1",
+				ReplyToMessageID: "",
+				IsE2E:            false,
+			},
+		},
+	}
+	svc, err := New(chatRepo, msgRepo)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	created, err := svc.CreateMessage(context.Background(), CreateMessageInput{
+		UserID:           "viewer-1",
+		ChatID:           "public-channel-1",
+		Content:          "comment",
+		ReplyToMessageID: "post-1",
+	})
+	if err != nil {
+		t.Fatalf("create comment: %v", err)
+	}
+	if created.ChatID != "public-channel-1" {
+		t.Fatalf("unexpected chat id: %s", created.ChatID)
+	}
+}
+
+func TestToggleMessageReactionAllowsOpenPublicChannelViewerWhenEnabled(t *testing.T) {
+	chatRepo := &memChatRepo{
+		chats: []Chat{{
+			ID:               "public-channel-1",
+			Title:            "News",
+			Type:             ChatTypeStandard,
+			Kind:             "standalone_channel",
+			IsPublic:         true,
+			CommentsEnabled:  true,
+			ReactionsEnabled: true,
+		}},
+		members: map[string]map[string]bool{
+			"public-channel-1": {"owner-1": true},
+		},
+		roles: map[string]map[string]string{
+			"public-channel-1": {"owner-1": "owner"},
+		},
+	}
+	msgRepo := &memMsgRepo{
+		metas: map[string]MessageMeta{
+			"post-1": {
+				ID:               "post-1",
+				ChatID:           "public-channel-1",
+				UserID:           "owner-1",
+				ReplyToMessageID: "",
+				IsE2E:            false,
+			},
+		},
+	}
+	svc, err := New(chatRepo, msgRepo)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	reactions, action, err := svc.ToggleMessageReactionByID(context.Background(), "viewer-1", "post-1", "🔥")
+	if err != nil {
+		t.Fatalf("toggle reaction: %v", err)
+	}
+	if action != "set" {
+		t.Fatalf("unexpected action: %s", action)
+	}
+	if len(reactions) != 1 || reactions[0].Emoji != "🔥" {
+		t.Fatalf("unexpected reactions: %#v", reactions)
+	}
+}
+
+func TestToggleMessageReactionRejectsOpenPublicChannelViewerWhenDisabled(t *testing.T) {
+	chatRepo := &memChatRepo{
+		chats: []Chat{{
+			ID:               "public-channel-1",
+			Title:            "News",
+			Type:             ChatTypeStandard,
+			Kind:             "standalone_channel",
+			IsPublic:         true,
+			CommentsEnabled:  true,
+			ReactionsEnabled: false,
+		}},
+		members: map[string]map[string]bool{
+			"public-channel-1": {"owner-1": true},
+		},
+		roles: map[string]map[string]string{
+			"public-channel-1": {"owner-1": "owner"},
+		},
+	}
+	msgRepo := &memMsgRepo{
+		metas: map[string]MessageMeta{
+			"post-1": {
+				ID:               "post-1",
+				ChatID:           "public-channel-1",
+				UserID:           "owner-1",
+				ReplyToMessageID: "",
+				IsE2E:            false,
+			},
+		},
+	}
+	svc, err := New(chatRepo, msgRepo)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	_, _, err = svc.ToggleMessageReactionByID(context.Background(), "viewer-1", "post-1", "🔥")
 	if err == nil {
 		t.Fatalf("expected forbidden error")
 	}

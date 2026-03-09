@@ -20,6 +20,21 @@ type ChatRepository struct {
 
 // topic allocation uses chats.next_topic_number on the group row.
 
+func (r *ChatRepository) isStandaloneChannelChat(ctx context.Context, chatID string) (bool, error) {
+	const query = `
+		SELECT EXISTS(
+			SELECT 1
+			FROM standalone_channels
+			WHERE chat_id = $1::uuid
+		)
+	`
+	var exists bool
+	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(chatID)).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 func (r *MessageRepository) GetMessageMeta(ctx context.Context, messageID string) (chat.MessageMeta, error) {
 	const query = `
 		SELECT id::text, chat_id::text, COALESCE(user_id::text, ''), COALESCE(reply_to_message_id::text, ''), sender_bot_id::text, is_e2e
@@ -79,7 +94,7 @@ func (r *ChatRepository) CreateChat(ctx context.Context, title string, memberIDs
 	const insertChat = `
 		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind, parent_chat_id, channel_type)
 		VALUES ($1, $2, $3::uuid, $4, $5, NULL, NULL)
-		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, parent_chat_id::text, channel_type, bot_id::text, avatar_data_url, avatar_gradient, created_at
+		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, reactions_enabled, parent_chat_id::text, channel_type, bot_id::text, avatar_data_url, avatar_gradient, created_at
 	`
 
 	var created chat.Chat
@@ -89,7 +104,7 @@ func (r *ChatRepository) CreateChat(ctx context.Context, title string, memberIDs
 		chatKind = "direct"
 	}
 	err = tx.QueryRow(ctx, insertChat, title, isDirect, creatorID, chatType, chatKind).
-		Scan(&created.ID, &created.Title, &created.IsDirect, &created.Type, &created.Kind, &created.IsPublic, &created.PublicSlug, &created.CommentsEnabled, &created.ParentChatID, &created.ChannelType, &created.BotID, &created.AvatarURL, &created.AvatarBg, &created.CreatedAt)
+		Scan(&created.ID, &created.Title, &created.IsDirect, &created.Type, &created.Kind, &created.IsPublic, &created.PublicSlug, &created.CommentsEnabled, &created.ReactionsEnabled, &created.ParentChatID, &created.ChannelType, &created.BotID, &created.AvatarURL, &created.AvatarBg, &created.CreatedAt)
 	if err != nil {
 		return chat.Chat{}, fmt.Errorf("insert chat: %w", err)
 	}
@@ -147,7 +162,7 @@ func (r *ChatRepository) CreateChannel(ctx context.Context, parentChatID, title,
 		FROM chats parent
 		WHERE parent.id = $1::uuid
 		  AND parent.chat_kind = 'group'
-		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, parent_chat_id::text, channel_type, topic_number, bot_id::text, avatar_data_url, avatar_gradient, created_at
+		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, reactions_enabled, parent_chat_id::text, channel_type, topic_number, bot_id::text, avatar_data_url, avatar_gradient, created_at
 	`
 
 	var created chat.Chat
@@ -168,6 +183,7 @@ func (r *ChatRepository) CreateChannel(ctx context.Context, parentChatID, title,
 		&created.IsPublic,
 		&created.PublicSlug,
 		&created.CommentsEnabled,
+		&created.ReactionsEnabled,
 		&created.ParentChatID,
 		&created.ChannelType,
 		&created.TopicNumber,
@@ -199,7 +215,7 @@ func (r *ChatRepository) CreateChannel(ctx context.Context, parentChatID, title,
 	return created, nil
 }
 
-func (r *ChatRepository) CreatePublicChannel(ctx context.Context, title, publicSlug, creatorID string, isPublic bool) (chat.Chat, error) {
+func (r *ChatRepository) CreateStandaloneChannel(ctx context.Context, title, publicSlug, creatorID string, isPublic bool) (chat.Chat, error) {
 	tx, err := r.client.pool.Begin(ctx)
 	if err != nil {
 		return chat.Chat{}, fmt.Errorf("begin tx: %w", err)
@@ -209,41 +225,41 @@ func (r *ChatRepository) CreatePublicChannel(ctx context.Context, title, publicS
 	}()
 
 	const insertChat = `
-		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind, is_public, public_slug, comments_enabled)
-		VALUES ($1, FALSE, $2::uuid, 'standard', 'public_channel', $3, $4, TRUE)
-		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, parent_chat_id::text, channel_type, topic_number, bot_id::text, avatar_data_url, avatar_gradient, created_at
+		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind)
+		VALUES ($1, FALSE, $2::uuid, 'standard', 'standalone_channel')
+		RETURNING id::text, created_at
 	`
 
 	var created chat.Chat
+	var createdAt time.Time
 	var publicSlugValue any
 	if strings.TrimSpace(publicSlug) != "" {
 		publicSlugValue = strings.TrimSpace(publicSlug)
 	}
-	if err := tx.QueryRow(ctx, insertChat, strings.TrimSpace(title), strings.TrimSpace(creatorID), isPublic, publicSlugValue).Scan(
-		&created.ID,
-		&created.Title,
-		&created.IsDirect,
-		&created.Type,
-		&created.Kind,
-		&created.IsPublic,
-		&created.PublicSlug,
-		&created.CommentsEnabled,
-		&created.ParentChatID,
-		&created.ChannelType,
-		&created.TopicNumber,
-		&created.BotID,
-		&created.AvatarURL,
-		&created.AvatarBg,
-		&created.CreatedAt,
-	); err != nil {
+	if err := tx.QueryRow(ctx, insertChat, strings.TrimSpace(title), strings.TrimSpace(creatorID)).Scan(&created.ID, &createdAt); err != nil {
+		return chat.Chat{}, err
+	}
+
+	const insertMeta = `
+		INSERT INTO standalone_channels (
+			chat_id, title, created_by, is_public, public_slug, comments_enabled, reactions_enabled, created_at, updated_at
+		)
+		VALUES ($1::uuid, $2, $3::uuid, $4, $5, TRUE, TRUE, $6, $6)
+	`
+	if _, err := tx.Exec(ctx, insertMeta, created.ID, strings.TrimSpace(title), strings.TrimSpace(creatorID), isPublic, publicSlugValue, createdAt); err != nil {
 		return chat.Chat{}, err
 	}
 
 	const insertOwner = `
-		INSERT INTO chat_members (chat_id, user_id, role)
+		INSERT INTO standalone_channel_members (chat_id, user_id, role)
 		VALUES ($1::uuid, $2::uuid, 'owner')
 	`
 	if _, err := tx.Exec(ctx, insertOwner, created.ID, strings.TrimSpace(creatorID)); err != nil {
+		return chat.Chat{}, err
+	}
+
+	created, err = r.getChatTx(ctx, tx, created.ID)
+	if err != nil {
 		return chat.Chat{}, err
 	}
 
@@ -255,7 +271,7 @@ func (r *ChatRepository) CreatePublicChannel(ctx context.Context, title, publicS
 
 func (r *ChatRepository) FindDirectChatByMembers(ctx context.Context, userAID, userBID, chatType string) (chat.Chat, bool, error) {
 	const query = `
-		SELECT c.id::text, c.title, c.is_direct, c.chat_type, c.chat_kind, c.is_public, c.public_slug, c.comments_enabled, c.parent_chat_id::text, c.channel_type, c.bot_id::text, c.avatar_data_url, c.avatar_gradient, c.created_at
+		SELECT c.id::text, c.title, c.is_direct, c.chat_type, c.chat_kind, c.is_public, c.public_slug, c.comments_enabled, c.reactions_enabled, c.parent_chat_id::text, c.channel_type, c.bot_id::text, c.avatar_data_url, c.avatar_gradient, c.created_at
 		FROM chats c
 		JOIN chat_members cm_a ON cm_a.chat_id = c.id AND cm_a.user_id = $1::uuid
 		JOIN chat_members cm_b ON cm_b.chat_id = c.id AND cm_b.user_id = $2::uuid
@@ -272,7 +288,7 @@ func (r *ChatRepository) FindDirectChatByMembers(ctx context.Context, userAID, u
 	`
 	var found chat.Chat
 	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(userAID), strings.TrimSpace(userBID), strings.TrimSpace(chatType)).
-		Scan(&found.ID, &found.Title, &found.IsDirect, &found.Type, &found.Kind, &found.IsPublic, &found.PublicSlug, &found.CommentsEnabled, &found.ParentChatID, &found.ChannelType, &found.BotID, &found.AvatarURL, &found.AvatarBg, &found.CreatedAt); err != nil {
+		Scan(&found.ID, &found.Title, &found.IsDirect, &found.Type, &found.Kind, &found.IsPublic, &found.PublicSlug, &found.CommentsEnabled, &found.ReactionsEnabled, &found.ParentChatID, &found.ChannelType, &found.BotID, &found.AvatarURL, &found.AvatarBg, &found.CreatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chat.Chat{}, false, nil
 		}
@@ -283,59 +299,96 @@ func (r *ChatRepository) FindDirectChatByMembers(ctx context.Context, userAID, u
 
 func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]chat.Chat, error) {
 	const query = `
-		SELECT c.id::text,
-		       CASE
-		         WHEN c.is_direct THEN COALESCE(NULLIF(TRIM(CONCAT_WS(' ', peer.first_name, peer.last_name)), ''), peer.username, c.title)
-		         ELSE c.title
-		       END AS display_title,
-		       c.is_direct,
-		       c.chat_type,
-		       c.chat_kind,
-		       c.is_public,
-		       c.public_slug,
-		       c.comments_enabled,
-		       c.parent_chat_id::text,
-		       c.channel_type,
-		       c.bot_id::text,
-		       peer.id::text,
-		       cm.role,
-		       CASE
-		         WHEN c.chat_kind = 'public_channel' THEN (
-		           SELECT COUNT(*)
-		           FROM chat_members cm_count
-		           WHERE cm_count.chat_id = c.id
-		             AND cm_count.role <> 'banned'
-		         )
-		         ELSE NULL
-		       END AS subscriber_count,
-		       CASE WHEN c.is_direct THEN peer.avatar_data_url ELSE c.avatar_data_url END,
-		       CASE WHEN c.is_direct THEN peer.avatar_gradient ELSE c.avatar_gradient END,
-		       latest.content,
-		       c.created_at
-		FROM chats c
-		INNER JOIN chat_members cm ON cm.chat_id = c.id
-		LEFT JOIN LATERAL (
-			SELECT u.id, u.username, u.first_name, u.last_name, u.avatar_data_url, u.avatar_gradient
-			FROM chat_members cm_peer
-			INNER JOIN users u ON u.id = cm_peer.user_id
-			WHERE cm_peer.chat_id = c.id
-			  AND cm_peer.user_id <> $1::uuid
-			ORDER BY cm_peer.joined_at ASC
-			LIMIT 1
-		) peer ON c.is_direct = TRUE
-		LEFT JOIN LATERAL (
-			SELECT m.content
-			FROM messages m
-			WHERE m.chat_id = c.id
-			  AND m.deleted_at IS NULL
-			ORDER BY m.created_at DESC
-			LIMIT 1
-		) latest ON TRUE
-		WHERE cm.user_id = $1::uuid
-		  AND cm.role <> 'banned'
-		  AND c.chat_kind <> 'channel'
-		  AND (c.is_direct = FALSE OR peer.id IS NOT NULL)
-		ORDER BY c.created_at DESC
+		SELECT *
+		FROM (
+			SELECT c.id::text,
+			       CASE
+			         WHEN c.is_direct THEN COALESCE(NULLIF(TRIM(CONCAT_WS(' ', peer.first_name, peer.last_name)), ''), peer.username, c.title)
+			         ELSE c.title
+			       END AS display_title,
+			       c.is_direct,
+			       c.chat_type,
+			       c.chat_kind,
+			       c.is_public,
+			       c.public_slug,
+			       c.comments_enabled,
+			       c.reactions_enabled,
+			       c.parent_chat_id::text,
+			       c.channel_type,
+			       c.bot_id::text,
+			       peer.id::text,
+			       cm.role,
+			       NULL::int AS subscriber_count,
+			       CASE WHEN c.is_direct THEN peer.avatar_data_url ELSE c.avatar_data_url END,
+			       CASE WHEN c.is_direct THEN peer.avatar_gradient ELSE c.avatar_gradient END,
+			       latest.content,
+			       c.created_at
+			FROM chats c
+			INNER JOIN chat_members cm ON cm.chat_id = c.id
+			LEFT JOIN LATERAL (
+				SELECT u.id, u.username, u.first_name, u.last_name, u.avatar_data_url, u.avatar_gradient
+				FROM chat_members cm_peer
+				INNER JOIN users u ON u.id = cm_peer.user_id
+				WHERE cm_peer.chat_id = c.id
+				  AND cm_peer.user_id <> $1::uuid
+				ORDER BY cm_peer.joined_at ASC
+				LIMIT 1
+			) peer ON c.is_direct = TRUE
+			LEFT JOIN LATERAL (
+				SELECT m.content
+				FROM messages m
+				WHERE m.chat_id = c.id
+				  AND m.deleted_at IS NULL
+				ORDER BY m.created_at DESC
+				LIMIT 1
+			) latest ON TRUE
+			WHERE cm.user_id = $1::uuid
+			  AND cm.role <> 'banned'
+			  AND c.chat_kind <> 'channel'
+			  AND c.chat_kind <> 'standalone_channel'
+			  AND (c.is_direct = FALSE OR peer.id IS NOT NULL)
+
+			UNION ALL
+
+			SELECT c.id::text,
+			       pc.title,
+			       FALSE,
+			       c.chat_type,
+			       'standalone_channel',
+			       pc.is_public,
+			       pc.public_slug,
+			       pc.comments_enabled,
+			       pc.reactions_enabled,
+			       NULL::text,
+			       NULL::text,
+			       c.bot_id::text,
+			       NULL::text,
+			       pcm.role,
+			       (
+			         SELECT COUNT(*)
+			         FROM standalone_channel_members pcm_count
+			         WHERE pcm_count.chat_id = pc.chat_id
+			           AND pcm_count.role <> 'banned'
+			       )::int,
+			       pc.avatar_data_url,
+			       pc.avatar_gradient,
+			       latest.content,
+			       c.created_at
+			FROM standalone_channels pc
+			INNER JOIN chats c ON c.id = pc.chat_id
+			INNER JOIN standalone_channel_members pcm ON pcm.chat_id = pc.chat_id
+			LEFT JOIN LATERAL (
+				SELECT m.content
+				FROM messages m
+				WHERE m.chat_id = c.id
+				  AND m.deleted_at IS NULL
+				ORDER BY m.created_at DESC
+				LIMIT 1
+			) latest ON TRUE
+			WHERE pcm.user_id = $1::uuid
+			  AND pcm.role <> 'banned'
+		) items
+		ORDER BY created_at DESC
 	`
 	rows, err := r.client.pool.Query(ctx, query, userID)
 	if err != nil {
@@ -355,6 +408,7 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 			&item.IsPublic,
 			&item.PublicSlug,
 			&item.CommentsEnabled,
+			&item.ReactionsEnabled,
 			&item.ParentChatID,
 			&item.ChannelType,
 			&item.BotID,
@@ -397,15 +451,26 @@ func (r *ChatRepository) DeleteChannel(ctx context.Context, parentChatID, channe
 	return nil
 }
 
-func (r *ChatRepository) GetChat(ctx context.Context, chatID string) (chat.Chat, error) {
-	const query = `
-		SELECT id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, parent_chat_id::text, channel_type, topic_number, bot_id::text, avatar_data_url, avatar_gradient, created_at
-		FROM chats
-		WHERE id = $1::uuid
-		LIMIT 1
-	`
+func scanChatRow(row pgx.Row) (chat.Chat, error) {
 	var item chat.Chat
-	if err := r.client.pool.QueryRow(ctx, query, chatID).Scan(&item.ID, &item.Title, &item.IsDirect, &item.Type, &item.Kind, &item.IsPublic, &item.PublicSlug, &item.CommentsEnabled, &item.ParentChatID, &item.ChannelType, &item.TopicNumber, &item.BotID, &item.AvatarURL, &item.AvatarBg, &item.CreatedAt); err != nil {
+	if err := row.Scan(
+		&item.ID,
+		&item.Title,
+		&item.IsDirect,
+		&item.Type,
+		&item.Kind,
+		&item.IsPublic,
+		&item.PublicSlug,
+		&item.CommentsEnabled,
+		&item.ReactionsEnabled,
+		&item.ParentChatID,
+		&item.ChannelType,
+		&item.TopicNumber,
+		&item.BotID,
+		&item.AvatarURL,
+		&item.AvatarBg,
+		&item.CreatedAt,
+	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chat.Chat{}, chat.ErrChatNotFound
 		}
@@ -414,11 +479,127 @@ func (r *ChatRepository) GetChat(ctx context.Context, chatID string) (chat.Chat,
 	return item, nil
 }
 
-func (r *ChatRepository) UpdateChat(ctx context.Context, input chat.UpdateChatInput) (chat.Chat, error) {
-	setClauses := make([]string, 0, 6)
-	args := make([]any, 0, 5)
-	arg := 1
+func getChatQuery() string {
+	return `
+		SELECT c.id::text,
+		       COALESCE(pc.title, c.title),
+		       c.is_direct,
+		       c.chat_type,
+		       CASE WHEN pc.chat_id IS NOT NULL THEN 'standalone_channel' ELSE c.chat_kind END,
+		       COALESCE(pc.is_public, c.is_public),
+		       COALESCE(pc.public_slug, c.public_slug),
+		       COALESCE(pc.comments_enabled, c.comments_enabled),
+		       COALESCE(pc.reactions_enabled, c.reactions_enabled),
+		       c.parent_chat_id::text,
+		       c.channel_type,
+		       c.topic_number,
+		       c.bot_id::text,
+		       COALESCE(pc.avatar_data_url, c.avatar_data_url),
+		       COALESCE(pc.avatar_gradient, c.avatar_gradient),
+		       c.created_at
+		FROM chats c
+		LEFT JOIN standalone_channels pc ON pc.chat_id = c.id
+		WHERE c.id = $1::uuid
+		LIMIT 1
+	`
+}
 
+func (r *ChatRepository) getChatTx(ctx context.Context, tx pgx.Tx, chatID string) (chat.Chat, error) {
+	return scanChatRow(tx.QueryRow(ctx, getChatQuery(), strings.TrimSpace(chatID)))
+}
+
+func (r *ChatRepository) GetChat(ctx context.Context, chatID string) (chat.Chat, error) {
+	const query = `
+		SELECT c.id::text,
+		       COALESCE(pc.title, c.title),
+		       c.is_direct,
+		       c.chat_type,
+		       CASE WHEN pc.chat_id IS NOT NULL THEN 'standalone_channel' ELSE c.chat_kind END,
+		       COALESCE(pc.is_public, c.is_public),
+		       COALESCE(pc.public_slug, c.public_slug),
+		       COALESCE(pc.comments_enabled, c.comments_enabled),
+		       COALESCE(pc.reactions_enabled, c.reactions_enabled),
+		       c.parent_chat_id::text,
+		       c.channel_type,
+		       c.topic_number,
+		       c.bot_id::text,
+		       COALESCE(pc.avatar_data_url, c.avatar_data_url),
+		       COALESCE(pc.avatar_gradient, c.avatar_gradient),
+		       c.created_at
+		FROM chats c
+		LEFT JOIN standalone_channels pc ON pc.chat_id = c.id
+		WHERE c.id = $1::uuid
+		LIMIT 1
+	`
+	return scanChatRow(r.client.pool.QueryRow(ctx, query, strings.TrimSpace(chatID)))
+}
+
+func (r *ChatRepository) UpdateChat(ctx context.Context, input chat.UpdateChatInput) (chat.Chat, error) {
+	isStandaloneChannel, err := r.isStandaloneChannelChat(ctx, input.ChatID)
+	if err != nil {
+		return chat.Chat{}, err
+	}
+	if isStandaloneChannel {
+		setClauses := make([]string, 0, 7)
+		args := make([]any, 0, 8)
+		arg := 1
+		if input.Title.Set {
+			setClauses = append(setClauses, fmt.Sprintf("title = $%d", arg))
+			args = append(args, input.Title.Value)
+			arg++
+		}
+		if input.AvatarDataURL.Set {
+			setClauses = append(setClauses, fmt.Sprintf("avatar_data_url = $%d", arg))
+			args = append(args, input.AvatarDataURL.Value)
+			arg++
+		}
+		if input.AvatarGradient.Set {
+			setClauses = append(setClauses, fmt.Sprintf("avatar_gradient = $%d", arg))
+			args = append(args, input.AvatarGradient.Value)
+			arg++
+		}
+		if input.CommentsEnabled.Set {
+			setClauses = append(setClauses, fmt.Sprintf("comments_enabled = $%d", arg))
+			args = append(args, input.CommentsEnabled.Value)
+			arg++
+		}
+		if input.ReactionsEnabled.Set {
+			setClauses = append(setClauses, fmt.Sprintf("reactions_enabled = $%d", arg))
+			args = append(args, input.ReactionsEnabled.Value)
+			arg++
+		}
+		if input.IsPublic.Set {
+			setClauses = append(setClauses, fmt.Sprintf("is_public = $%d", arg))
+			args = append(args, input.IsPublic.Value)
+			arg++
+		}
+		if input.PublicSlug.Set {
+			setClauses = append(setClauses, fmt.Sprintf("public_slug = $%d", arg))
+			args = append(args, input.PublicSlug.Value)
+			arg++
+		}
+		if len(setClauses) == 0 {
+			return chat.Chat{}, chat.ErrChatNotFound
+		}
+		query := fmt.Sprintf(`
+			UPDATE standalone_channels
+			SET %s, updated_at = NOW()
+			WHERE chat_id = $%d::uuid
+		`, strings.Join(setClauses, ", "), arg)
+		args = append(args, strings.TrimSpace(input.ChatID))
+		tag, err := r.client.pool.Exec(ctx, query, args...)
+		if err != nil {
+			return chat.Chat{}, err
+		}
+		if tag.RowsAffected() == 0 {
+			return chat.Chat{}, chat.ErrChatNotFound
+		}
+		return r.GetChat(ctx, input.ChatID)
+	}
+
+	setClauses := make([]string, 0, 3)
+	args := make([]any, 0, 4)
+	arg := 1
 	if input.Title.Set {
 		setClauses = append(setClauses, fmt.Sprintf("title = $%d", arg))
 		args = append(args, input.Title.Value)
@@ -434,56 +615,23 @@ func (r *ChatRepository) UpdateChat(ctx context.Context, input chat.UpdateChatIn
 		args = append(args, input.AvatarGradient.Value)
 		arg++
 	}
-	if input.CommentsEnabled.Set {
-		setClauses = append(setClauses, fmt.Sprintf("comments_enabled = $%d", arg))
-		args = append(args, input.CommentsEnabled.Value)
-		arg++
-	}
-	if input.IsPublic.Set {
-		setClauses = append(setClauses, fmt.Sprintf("is_public = $%d", arg))
-		args = append(args, input.IsPublic.Value)
-		arg++
-	}
-	if input.PublicSlug.Set {
-		setClauses = append(setClauses, fmt.Sprintf("public_slug = $%d", arg))
-		args = append(args, input.PublicSlug.Value)
-		arg++
-	}
 	if len(setClauses) == 0 {
 		return chat.Chat{}, chat.ErrChatNotFound
 	}
-
 	query := fmt.Sprintf(`
 		UPDATE chats
 		SET %s, updated_at = NOW()
 		WHERE id = $%d::uuid
-		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, parent_chat_id::text, channel_type, bot_id::text, avatar_data_url, avatar_gradient, created_at
 	`, strings.Join(setClauses, ", "), arg)
 	args = append(args, strings.TrimSpace(input.ChatID))
-
-	var item chat.Chat
-	if err := r.client.pool.QueryRow(ctx, query, args...).Scan(
-		&item.ID,
-		&item.Title,
-		&item.IsDirect,
-		&item.Type,
-		&item.Kind,
-		&item.IsPublic,
-		&item.PublicSlug,
-		&item.CommentsEnabled,
-		&item.ParentChatID,
-		&item.ChannelType,
-		&item.BotID,
-		&item.AvatarURL,
-		&item.AvatarBg,
-		&item.CreatedAt,
-	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return chat.Chat{}, chat.ErrChatNotFound
-		}
+	tag, err := r.client.pool.Exec(ctx, query, args...)
+	if err != nil {
 		return chat.Chat{}, err
 	}
-	return item, nil
+	if tag.RowsAffected() == 0 {
+		return chat.Chat{}, chat.ErrChatNotFound
+	}
+	return r.GetChat(ctx, input.ChatID)
 }
 
 func (r *ChatRepository) ListChatInviteLinks(ctx context.Context, chatID string) ([]chat.ChatInviteLink, error) {
@@ -558,13 +706,26 @@ func (r *ChatRepository) IncrementChatInviteLinkUse(ctx context.Context, linkID 
 }
 
 func (r *ChatRepository) ListChatMemberIDs(ctx context.Context, chatID string) ([]string, error) {
-	const query = `
+	query := `
 		SELECT user_id::text
 		FROM chat_members
 		WHERE chat_id = $1::uuid
 		  AND role <> 'banned'
 		ORDER BY joined_at ASC
 	`
+	isStandaloneChannel, err := r.isStandaloneChannelChat(ctx, chatID)
+	if err != nil {
+		return nil, err
+	}
+	if isStandaloneChannel {
+		query = `
+			SELECT user_id::text
+			FROM standalone_channel_members
+			WHERE chat_id = $1::uuid
+			  AND role <> 'banned'
+			ORDER BY joined_at ASC
+		`
+	}
 	rows, err := r.client.pool.Query(ctx, query, chatID)
 	if err != nil {
 		return nil, err
@@ -591,6 +752,17 @@ func (r *ChatRepository) ListChatMembers(ctx context.Context, chatID string, inc
 		FROM chat_members
 		WHERE chat_id = $1::uuid
 	`
+	isStandaloneChannel, err := r.isStandaloneChannelChat(ctx, chatID)
+	if err != nil {
+		return nil, err
+	}
+	if isStandaloneChannel {
+		query = `
+			SELECT user_id::text, role, joined_at
+			FROM standalone_channel_members
+			WHERE chat_id = $1::uuid
+		`
+	}
 	if !includeBanned {
 		query += `
 		  AND role <> 'banned'
@@ -621,11 +793,22 @@ func (r *ChatRepository) ListChatMembers(ctx context.Context, chatID string, inc
 }
 
 func (r *ChatRepository) AddChatMembers(ctx context.Context, chatID string, memberIDs []string) error {
-	const query = `
+	query := `
 		INSERT INTO chat_members (chat_id, user_id, role)
 		VALUES ($1::uuid, $2::uuid, 'member')
 		ON CONFLICT (chat_id, user_id) DO NOTHING
 	`
+	isStandaloneChannel, err := r.isStandaloneChannelChat(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if isStandaloneChannel {
+		query = `
+			INSERT INTO standalone_channel_members (chat_id, user_id, role)
+			VALUES ($1::uuid, $2::uuid, 'subscriber')
+			ON CONFLICT (chat_id, user_id) DO NOTHING
+		`
+	}
 	for _, memberID := range memberIDs {
 		if _, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(memberID)); err != nil {
 			if strings.Contains(err.Error(), "violates foreign key constraint") {
@@ -638,12 +821,24 @@ func (r *ChatRepository) AddChatMembers(ctx context.Context, chatID string, memb
 }
 
 func (r *ChatRepository) UpdateChatMemberRole(ctx context.Context, chatID, userID, role string) error {
-	const query = `
+	query := `
 		UPDATE chat_members
 		SET role = $3
 		WHERE chat_id = $1::uuid
 		  AND user_id = $2::uuid
 	`
+	isStandaloneChannel, err := r.isStandaloneChannelChat(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if isStandaloneChannel {
+		query = `
+			UPDATE standalone_channel_members
+			SET role = $3
+			WHERE chat_id = $1::uuid
+			  AND user_id = $2::uuid
+		`
+	}
 	tag, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(userID), strings.TrimSpace(role))
 	if err != nil {
 		return err
@@ -655,11 +850,22 @@ func (r *ChatRepository) UpdateChatMemberRole(ctx context.Context, chatID, userI
 }
 
 func (r *ChatRepository) RemoveChatMember(ctx context.Context, chatID, userID string) error {
-	const query = `
+	query := `
 		DELETE FROM chat_members
 		WHERE chat_id = $1::uuid
 		  AND user_id = $2::uuid
 	`
+	isStandaloneChannel, err := r.isStandaloneChannelChat(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if isStandaloneChannel {
+		query = `
+			DELETE FROM standalone_channel_members
+			WHERE chat_id = $1::uuid
+			  AND user_id = $2::uuid
+		`
+	}
 	tag, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(userID))
 	if err != nil {
 		return err
@@ -671,12 +877,24 @@ func (r *ChatRepository) RemoveChatMember(ctx context.Context, chatID, userID st
 }
 
 func (r *ChatRepository) IsChatMember(ctx context.Context, chatID, userID string) (bool, error) {
-	const query = `
+	query := `
 		SELECT EXISTS(
 			SELECT 1 FROM chat_members
 			WHERE chat_id = $1::uuid AND user_id = $2::uuid AND role <> 'banned'
 		)
 	`
+	isStandaloneChannel, err := r.isStandaloneChannelChat(ctx, chatID)
+	if err != nil {
+		return false, err
+	}
+	if isStandaloneChannel {
+		query = `
+			SELECT EXISTS(
+				SELECT 1 FROM standalone_channel_members
+				WHERE chat_id = $1::uuid AND user_id = $2::uuid AND role <> 'banned'
+			)
+		`
+	}
 	var exists bool
 	if err := r.client.pool.QueryRow(ctx, query, chatID, userID).Scan(&exists); err != nil {
 		return false, err
@@ -694,6 +912,7 @@ func (r *ChatRepository) ListChannelsByParent(ctx context.Context, parentChatID,
 		       c.is_public,
 		       c.public_slug,
 		       c.comments_enabled,
+		       c.reactions_enabled,
 		       c.parent_chat_id::text,
 		       c.channel_type,
 		       c.topic_number,
@@ -738,6 +957,7 @@ func (r *ChatRepository) ListChannelsByParent(ctx context.Context, parentChatID,
 			&item.IsPublic,
 			&item.PublicSlug,
 			&item.CommentsEnabled,
+			&item.ReactionsEnabled,
 			&item.ParentChatID,
 			&item.ChannelType,
 			&item.TopicNumber,
@@ -760,13 +980,26 @@ func (r *ChatRepository) ListChannelsByParent(ctx context.Context, parentChatID,
 }
 
 func (r *ChatRepository) GetChatMemberRole(ctx context.Context, chatID, userID string) (string, error) {
-	const query = `
+	query := `
 		SELECT role
 		FROM chat_members
 		WHERE chat_id = $1::uuid
 		  AND user_id = $2::uuid
 		LIMIT 1
 	`
+	isStandaloneChannel, err := r.isStandaloneChannelChat(ctx, chatID)
+	if err != nil {
+		return "", err
+	}
+	if isStandaloneChannel {
+		query = `
+			SELECT role
+			FROM standalone_channel_members
+			WHERE chat_id = $1::uuid
+			  AND user_id = $2::uuid
+			LIMIT 1
+		`
+	}
 	var role string
 	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(userID)).Scan(&role); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

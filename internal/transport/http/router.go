@@ -45,6 +45,8 @@ type RouterDeps struct {
 	Auth           AuthService
 	EmailCode      EmailCodeService
 	Chat           ChatService
+	Messages       MessageService
+	Standalone     StandaloneChannelService
 	Search         SearchService
 	GIF            GIFService
 	Media          MediaService
@@ -92,10 +94,16 @@ func NewRouter(deps RouterDeps) http.Handler {
 		mux.HandleFunc("/api/private/v1/chats", newChatsHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/chats/direct", newDirectChatHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/chats/direct/messages", newDirectMessageHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
-		mux.HandleFunc("/api/private/v1/chats/", newChatMessagesHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
-		mux.HandleFunc("/api/private/v1/messages/", newMessagesByIDHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
-		mux.HandleFunc("/api/private/v1/public-channels", newPublicChannelsHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
-		mux.HandleFunc("/api/private/v1/public-channels/", newPublicChannelByIDHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+	}
+	if deps.Chat != nil && deps.Messages != nil {
+		mux.HandleFunc("/api/private/v1/chats/", newChatMessagesHandler(deps.Chat, deps.Messages, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/messages/", newMessagesByIDHandler(deps.Messages, deps.I18n, deps.DefaultLocale))
+	}
+	if deps.Standalone != nil {
+		mux.HandleFunc("/api/private/v1/channels", newChannelCollectionHandler(deps.Standalone, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/channels/", newChannelByIDHandler(deps.Standalone, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/public-channels", newChannelCollectionHandler(deps.Standalone, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/public-channels/", newChannelByIDHandler(deps.Standalone, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.Search != nil {
 		mux.HandleFunc("/api/private/v1/search", newSearchHandler(deps.Search, deps.I18n, deps.DefaultLocale))
@@ -119,15 +127,15 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.BotTokens != nil {
 		mux.HandleFunc("/api/private/v1/bot/tokens", newPrivateBotTokensHandler(deps.BotTokens, deps.I18n, deps.DefaultLocale))
 	}
-	if deps.Chat != nil && deps.BotAuth != nil {
-		mux.HandleFunc("/api/public/v1/bot/messages", newPublicBotMessagesHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
-		mux.HandleFunc("/api/public/v1/bot/chats/", newPublicBotChatMessagesHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+	if deps.Messages != nil && deps.BotAuth != nil {
+		mux.HandleFunc("/api/public/v1/bot/messages", newPublicBotMessagesHandler(deps.Messages, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/public/v1/bot/chats/", newPublicBotChatMessagesHandler(deps.Messages, deps.I18n, deps.DefaultLocale))
 		if deps.BotWebhooks != nil {
 			mux.HandleFunc("/api/public/v1/bot/webhooks", newPublicBotWebhooksHandler(deps.BotWebhooks, deps.I18n, deps.DefaultLocale))
 		}
 	}
 	if deps.Valkey != nil {
-		mux.HandleFunc("/api/private/v1/ws", newWSHandler(deps.Valkey, wsDeps{ChatService: deps.Chat, SearchService: deps.Search}, deps.AccessSecret, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/ws", newWSHandler(deps.Valkey, wsDeps{ChatService: deps.Chat, MessageService: deps.Messages, SearchService: deps.Search}, deps.AccessSecret, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.E2E != nil {
 		mux.HandleFunc("/api/private/v1/e2e/devices/", newE2EDeviceKeysHandler(deps.E2E, deps.I18n, deps.DefaultLocale))
@@ -243,10 +251,7 @@ type SearchService interface {
 type ChatService interface {
 	CreateChat(ctx context.Context, input chat.CreateChatInput) (chat.Chat, error)
 	CreateChannel(ctx context.Context, input chat.CreateChannelInput) (chat.Chat, error)
-	CreatePublicChannel(ctx context.Context, input chat.CreatePublicChannelInput) (chat.Chat, error)
 	DeleteChannel(ctx context.Context, input chat.DeleteChannelInput) error
-	SubscribePublicChannel(ctx context.Context, userID, chatID string) (chat.Chat, error)
-	UnsubscribePublicChannel(ctx context.Context, userID, chatID string) error
 	GetChat(ctx context.Context, userID, chatID string) (chat.Chat, error)
 	UpdateChat(ctx context.Context, input chat.UpdateChatInput) (chat.Chat, error)
 	ListInviteLinks(ctx context.Context, userID, chatID string) ([]chat.ChatInviteLink, error)
@@ -260,9 +265,12 @@ type ChatService interface {
 	AcceptInvite(ctx context.Context, userID, token string) (chat.Chat, error)
 	LeaveChat(ctx context.Context, userID, chatID string) error
 	ListChats(ctx context.Context, userID string) ([]chat.Chat, error)
-	CreateMessage(ctx context.Context, input chat.CreateMessageInput) (chat.Message, error)
 	CreateDirectMessage(ctx context.Context, input chat.CreateDirectMessageInput) (chat.Message, chat.Chat, error)
 	OpenDirectChat(ctx context.Context, input chat.OpenDirectChatInput) (chat.Chat, error)
+}
+
+type MessageService interface {
+	CreateMessage(ctx context.Context, input chat.CreateMessageInput) (chat.Message, error)
 	ListMessages(ctx context.Context, input chat.ListMessagesInput) (chat.MessagePage, error)
 	UpsertMessageStatus(ctx context.Context, input chat.UpsertMessageStatusInput) (chat.MessageStatus, error)
 	EditMessage(ctx context.Context, input chat.EditMessageInput) (chat.Message, error)
@@ -271,6 +279,17 @@ type ChatService interface {
 	DeleteMessageByID(ctx context.Context, userID, messageID string) error
 	MarkMessageReadByID(ctx context.Context, userID, messageID string) (chat.MessageStatus, error)
 	ToggleMessageReactionByID(ctx context.Context, userID, messageID, emoji string) ([]chat.MessageReaction, string, error)
+}
+
+type StandaloneChannelService interface {
+	CreateStandaloneChannel(ctx context.Context, input chat.CreateStandaloneChannelInput) (chat.Chat, error)
+	GetChannel(ctx context.Context, userID, chatID string) (chat.Chat, error)
+	UpdateChannel(ctx context.Context, input chat.UpdateChatInput) (chat.Chat, error)
+	ListMembers(ctx context.Context, userID, chatID string, includeBanned bool) ([]chat.ChatMember, error)
+	UpdateMemberRole(ctx context.Context, actorUserID, chatID, targetUserID, role string) ([]chat.ChatMember, error)
+	RemoveMember(ctx context.Context, actorUserID, chatID, targetUserID string) ([]chat.ChatMember, error)
+	SubscribeChannel(ctx context.Context, userID, chatID string) (chat.Chat, error)
+	UnsubscribeChannel(ctx context.Context, userID, chatID string) error
 }
 
 type E2EService interface {

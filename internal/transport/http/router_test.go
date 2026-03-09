@@ -132,6 +132,7 @@ func TestPrivateRouteRequiresAuthorizationHeader(t *testing.T) {
 		DefaultLocale: "en",
 		AccessSecret:  "test-secret",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 	})
 
 	req := httptest.NewRequest(stdhttp.MethodGet, "/api/private/v1/chats", nil)
@@ -154,6 +155,7 @@ func TestPrivateRouteAllowsValidBearerToken(t *testing.T) {
 		DefaultLocale: "en",
 		AccessSecret:  "test-secret",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 	})
 
 	token := makeAccessToken(t, "u-test", "test-secret", time.Now().UTC().Add(10*time.Minute).Unix())
@@ -224,6 +226,7 @@ func TestPublicBotRouteRequiresBearerToken(t *testing.T) {
 		I18n:          testTranslator(),
 		DefaultLocale: "en",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 		BotAuth:       stubBotAuthService{},
 	})
 
@@ -246,6 +249,7 @@ func TestPublicBotRouteRejectsMissingScope(t *testing.T) {
 		I18n:          testTranslator(),
 		DefaultLocale: "en",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
 			UserID:          "u-bot",
 			Scopes:          map[string]struct{}{"bot:messages:write": {}},
@@ -274,6 +278,7 @@ func TestPublicBotRouteRejectsChatOutOfScope(t *testing.T) {
 		I18n:          testTranslator(),
 		DefaultLocale: "en",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
 			UserID:          "u-bot",
 			Scopes:          map[string]struct{}{"bot:messages:read": {}},
@@ -302,6 +307,7 @@ func TestPublicBotRouteAllowsScopedAccess(t *testing.T) {
 		I18n:          testTranslator(),
 		DefaultLocale: "en",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
 			UserID:          "u-bot",
 			Scopes:          map[string]struct{}{"bot:messages:read": {}},
@@ -330,6 +336,7 @@ func TestPublicBotWebhookRouteRejectsMissingScope(t *testing.T) {
 		I18n:          testTranslator(),
 		DefaultLocale: "en",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
 			UserID:          "u-bot",
 			Scopes:          map[string]struct{}{"bot:messages:read": {}},
@@ -359,6 +366,7 @@ func TestPublicBotWebhookRouteCreatesWebhook(t *testing.T) {
 		I18n:          testTranslator(),
 		DefaultLocale: "en",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
 			UserID:          "u-bot",
 			Scopes:          map[string]struct{}{"bot:webhooks:write": {}},
@@ -388,6 +396,7 @@ func TestPublicBotWebhookRouteReturnsConflictOnDuplicate(t *testing.T) {
 		I18n:          testTranslator(),
 		DefaultLocale: "en",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 		BotAuth: stubBotAuthService{principal: botauthsvc.Principal{
 			UserID:          "u-bot",
 			Scopes:          map[string]struct{}{"bot:webhooks:write": {}},
@@ -472,8 +481,8 @@ func (stubChatService) CreateChannel(context.Context, chatsvc.CreateChannelInput
 	return chatsvc.Chat{ID: "channel-1", Title: "General", Type: "standard", Kind: "channel"}, nil
 }
 
-func (stubChatService) CreatePublicChannel(context.Context, chatsvc.CreatePublicChannelInput) (chatsvc.Chat, error) {
-	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
+func (stubChatService) CreateStandaloneChannel(context.Context, chatsvc.CreateStandaloneChannelInput) (chatsvc.Chat, error) {
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) OpenDirectChat(_ context.Context, input chatsvc.OpenDirectChatInput) (chatsvc.Chat, error) {
@@ -499,8 +508,20 @@ func (stubChatService) UpdateChat(_ context.Context, input chatsvc.UpdateChatInp
 	return chatsvc.Chat{ID: input.ChatID, Title: title, Type: "standard", Kind: "group"}, nil
 }
 
+func (stubChatService) UpdateChannel(_ context.Context, input chatsvc.UpdateChatInput) (chatsvc.Chat, error) {
+	title := "News"
+	if input.Title.Set && input.Title.Value != nil {
+		title = *input.Title.Value
+	}
+	return chatsvc.Chat{ID: input.ChatID, Title: title, Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
+}
+
 func (stubChatService) GetChat(_ context.Context, _ string, chatID string) (chatsvc.Chat, error) {
-	return chatsvc.Chat{ID: chatID, Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
+	return chatsvc.Chat{ID: chatID, Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
+}
+
+func (stubChatService) GetChannel(_ context.Context, _ string, chatID string) (chatsvc.Chat, error) {
+	return chatsvc.Chat{ID: chatID, Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) ListChannels(context.Context, string, string) ([]chatsvc.Chat, error) {
@@ -535,11 +556,11 @@ func (stubChatService) RemoveMember(context.Context, string, string, string) ([]
 	}, nil
 }
 
-func (stubChatService) SubscribePublicChannel(context.Context, string, string) (chatsvc.Chat, error) {
-	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
+func (stubChatService) SubscribeChannel(context.Context, string, string) (chatsvc.Chat, error) {
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
-func (stubChatService) UnsubscribePublicChannel(context.Context, string, string) error {
+func (stubChatService) UnsubscribeChannel(context.Context, string, string) error {
 	return nil
 }
 
@@ -572,7 +593,7 @@ func (stubChatService) CreateInviteLink(context.Context, chatsvc.CreateInviteLin
 }
 
 func (stubChatService) AcceptInviteLink(context.Context, string, string) (chatsvc.Chat, error) {
-	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) LeaveChat(context.Context, string, string) error {
@@ -791,6 +812,7 @@ func TestChatsRouteRequiresUserHeader(t *testing.T) {
 		I18n:          testTranslator(),
 		DefaultLocale: "en",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 	})
 
 	req := httptest.NewRequest(stdhttp.MethodGet, "/api/private/v1/chats", nil)
@@ -815,6 +837,7 @@ func TestCreateChatRoute(t *testing.T) {
 		DefaultLocale: "en",
 		AccessSecret:  "test-secret",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 	})
 
 	req := httptest.NewRequest(stdhttp.MethodPost, "/api/private/v1/chats", strings.NewReader(`{"title":"General","member_ids":["u2"]}`))
@@ -842,6 +865,7 @@ func TestUpdateChatRoute(t *testing.T) {
 		DefaultLocale: "en",
 		AccessSecret:  "test-secret",
 		Chat:          stubChatService{},
+		Messages:      stubChatService{},
 	})
 
 	req := httptest.NewRequest(stdhttp.MethodPatch, "/api/private/v1/chats/chat-1", strings.NewReader(`{"title":"Renamed"}`))
@@ -855,6 +879,59 @@ func TestUpdateChatRoute(t *testing.T) {
 		t.Fatalf("expected 200, got %d; body=%s", rr.Code, rr.Body.String())
 	}
 	if !strings.Contains(rr.Body.String(), `"chat":{"id":"chat-1","title":"Renamed"`) {
+		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+}
+
+func TestCreateStandaloneChannelRoute(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		AccessSecret:  "test-secret",
+		Standalone:    stubChatService{},
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodPost, "/api/private/v1/channels", strings.NewReader(`{"title":"News","public_slug":"news"}`))
+	token := makeAccessToken(t, "u1", "test-secret", time.Now().UTC().Add(10*time.Minute).Unix())
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusCreated {
+		t.Fatalf("expected 201, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"kind":"standalone_channel"`) {
+		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+}
+
+func TestGetStandaloneChannelRoute(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		AccessSecret:  "test-secret",
+		Standalone:    stubChatService{},
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodGet, "/api/private/v1/channels/standalone-channel-1", nil)
+	token := makeAccessToken(t, "u1", "test-secret", time.Now().UTC().Add(10*time.Minute).Unix())
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusOK {
+		t.Fatalf("expected 200, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"kind":"standalone_channel"`) {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
 	}
 }

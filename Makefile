@@ -6,7 +6,7 @@ DOCKER ?= docker
 IMAGE ?= combox-backend:dev
 EDGE_DC := docker compose -f docker-compose.edge.yml
 
-.PHONY: tidy fmt build run test docker-build docker-run edge-up edge-down edge-logs
+.PHONY: tidy fmt build run test docker-build docker-run edge-up edge-down edge-logs commit
 
 tidy:
 	$(GO) mod tidy
@@ -45,3 +45,6 @@ edge-down:
 
 edge-logs:
 	$(EDGE_DC) logs -f --tail=120 combox-backend
+
+commit:
+	$(GO) run ./tools/commitflow --branch "$(branch)" --message "$(message)"

@@ -79,6 +79,16 @@ func (r *AuthSessionRepository) UpdateRefresh(ctx context.Context, sessionID, re
 	return nil
 }
 
+func (r *AuthSessionRepository) UpdateExpiryByUser(ctx context.Context, userID string, expiresAt time.Time) error {
+	const query = `
+		UPDATE sessions
+		SET expires_at = $2
+		WHERE user_id = $1::uuid
+	`
+	_, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(userID), expiresAt)
+	return err
+}
+
 func (r *AuthSessionRepository) DeleteByID(ctx context.Context, sessionID string) error {
 	const query = `DELETE FROM sessions WHERE id = $1::uuid`
 	tag, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(sessionID))

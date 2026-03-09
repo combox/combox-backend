@@ -345,6 +345,13 @@ func Run(ctx context.Context) error {
 	chatSvc.SetAvatarStore(minioClient, 0)
 	chatSvc.SetNotificationRepository(profileRepo)
 	chatSvc.SetInviteRepository(chatInviteStoreAdapter{r: chatInviteRepo}, 0)
+	messageSvc := chatsvc.NewMessageService(chatSvc)
+
+	standaloneSvc, err := chatsvc.NewStandaloneChannelService(chatRepo)
+	if err != nil {
+		return fmt.Errorf("init standalone channel service: %w", err)
+	}
+	standaloneSvc.SetAvatarStore(minioClient, 0)
 
 	e2eService, err := e2esvc.New(pgrepo.NewE2ERepository(postgresClient))
 	if err != nil {
@@ -412,6 +419,8 @@ func Run(ctx context.Context) error {
 		Auth:           authService,
 		EmailCode:      emailCodeAPI,
 		Chat:           chatSvc,
+		Messages:       messageSvc,
+		Standalone:     standaloneSvc,
 		Search:         searchService,
 		GIF:            gifService,
 		Media:          mediaService,

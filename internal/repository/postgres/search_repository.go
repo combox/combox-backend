@@ -130,17 +130,20 @@ func (r *SearchRepository) SearchPublicChats(ctx context.Context, q string, limi
 		}
 		pattern := strings.ToLower(handle) + "%"
 		const query = `
-			SELECT id::text,
-			       title,
-			       chat_kind,
-			       public_slug,
-			       avatar_data_url,
-			       avatar_gradient
-			FROM chats
-			WHERE is_public = TRUE
-			  AND chat_kind IN ('group', 'channel', 'public_channel')
-			  AND LOWER(COALESCE(public_slug, '')) LIKE $1
-			ORDER BY created_at DESC
+			SELECT c.id::text,
+			       COALESCE(pc.title, c.title),
+			       CASE WHEN pc.chat_id IS NOT NULL THEN 'standalone_channel' ELSE c.chat_kind END,
+			       COALESCE(pc.public_slug, c.public_slug),
+			       COALESCE(pc.avatar_data_url, c.avatar_data_url),
+			       COALESCE(pc.avatar_gradient, c.avatar_gradient)
+			FROM chats c
+			LEFT JOIN standalone_channels pc ON pc.chat_id = c.id
+			WHERE (
+			       (pc.chat_id IS NOT NULL AND pc.is_public = TRUE)
+			       OR (pc.chat_id IS NULL AND c.is_public = TRUE AND c.chat_kind IN ('group', 'channel'))
+			      )
+			  AND LOWER(COALESCE(pc.public_slug, c.public_slug, '')) LIKE $1
+			ORDER BY c.created_at DESC
 			LIMIT $2
 		`
 
@@ -172,20 +175,23 @@ func (r *SearchRepository) SearchPublicChats(ctx context.Context, q string, limi
 
 	pattern := "%" + strings.ToLower(q) + "%"
 	const query = `
-		SELECT id::text,
-		       title,
-		       chat_kind,
-		       public_slug,
-		       avatar_data_url,
-		       avatar_gradient
-		FROM chats
-		WHERE is_public = TRUE
-		  AND chat_kind IN ('group', 'channel', 'public_channel')
+		SELECT c.id::text,
+		       COALESCE(pc.title, c.title),
+		       CASE WHEN pc.chat_id IS NOT NULL THEN 'standalone_channel' ELSE c.chat_kind END,
+		       COALESCE(pc.public_slug, c.public_slug),
+		       COALESCE(pc.avatar_data_url, c.avatar_data_url),
+		       COALESCE(pc.avatar_gradient, c.avatar_gradient)
+		FROM chats c
+		LEFT JOIN standalone_channels pc ON pc.chat_id = c.id
+		WHERE (
+		       (pc.chat_id IS NOT NULL AND pc.is_public = TRUE)
+		       OR (pc.chat_id IS NULL AND c.is_public = TRUE AND c.chat_kind IN ('group', 'channel'))
+		      )
 		  AND (
-		       LOWER(title) LIKE $1
-		       OR LOWER(COALESCE(public_slug, '')) LIKE $1
+		       LOWER(COALESCE(pc.title, c.title)) LIKE $1
+		       OR LOWER(COALESCE(pc.public_slug, c.public_slug, '')) LIKE $1
 		  )
-		ORDER BY created_at DESC
+		ORDER BY c.created_at DESC
 		LIMIT $2
 	`
 

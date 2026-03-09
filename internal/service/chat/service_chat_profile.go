@@ -2,7 +2,6 @@ package chat
 
 import (
 	"context"
-	"errors"
 	"strings"
 )
 
@@ -27,20 +26,10 @@ func (s *Service) GetChat(ctx context.Context, userID, chatID string) (Chat, err
 		return Chat{}, mapChatOrMessageRepoError(err)
 	}
 
-	if strings.TrimSpace(strings.ToLower(target.Kind)) == "public_channel" && target.IsPublic {
-		role, roleErr := s.chats.GetChatMemberRole(ctx, chatID, userID)
-		switch {
-		case roleErr == nil:
-			if strings.EqualFold(role, "banned") {
-				return Chat{}, forbidden("error.chat.forbidden")
-			}
-			roleCopy := role
-			target.ViewerRole = &roleCopy
-		case errors.Is(roleErr, ErrChatNotFound):
-			target.ViewerRole = nil
-		default:
-			return Chat{}, internal(roleErr)
-		}
+	if err := s.standalone.ensureViewerAccess(ctx, &target, userID); err != nil {
+		return Chat{}, err
+	}
+	if isOpenStandaloneChannel(target) {
 		target.AvatarURL = s.resolveAvatarURL(ctx, target.AvatarURL)
 		return target, nil
 	}
@@ -58,7 +47,7 @@ func (s *Service) UpdateChat(ctx context.Context, input UpdateChatInput) (Chat, 
 	if userID == "" || chatID == "" {
 		return Chat{}, invalidArg("error.chat.invalid_input")
 	}
-	if !input.Title.Set && !input.AvatarDataURL.Set && !input.AvatarGradient.Set && !input.CommentsEnabled.Set && !input.IsPublic.Set && !input.PublicSlug.Set {
+	if !input.Title.Set && !input.AvatarDataURL.Set && !input.AvatarGradient.Set && !input.CommentsEnabled.Set && !input.ReactionsEnabled.Set && !input.IsPublic.Set && !input.PublicSlug.Set {
 		return Chat{}, invalidArg("error.chat.invalid_input")
 	}
 
@@ -110,7 +99,7 @@ func (s *Service) UpdateChat(ctx context.Context, input UpdateChatInput) (Chat, 
 			input.AvatarGradient.Value = &value
 		}
 	}
-	if target.Kind == "public_channel" {
+	if target.Kind == "standalone_channel" {
 		if input.IsPublic.Set {
 			if !input.IsPublic.Value {
 				input.PublicSlug = OptionalString{Set: true, Value: nil}

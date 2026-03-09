@@ -26,8 +26,9 @@ type wsRealtime interface {
 }
 
 type wsDeps struct {
-	ChatService   ChatService
-	SearchService SearchService
+	ChatService    ChatService
+	MessageService MessageService
+	SearchService  SearchService
 }
 
 var wsUpgrader = websocket.Upgrader{
@@ -264,7 +265,7 @@ func handleRequest(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mute
 	}
 	switch msgType {
 	case "request.chats":
-		if deps.ChatService == nil {
+		if deps.MessageService == nil {
 			reply(map[string]any{"error": "service_unavailable"})
 			return
 		}
@@ -291,7 +292,7 @@ func handleRequest(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mute
 			reply(map[string]any{"error": "missing chat_id"})
 			return
 		}
-		page, err := deps.ChatService.ListMessages(ctx, chat.ListMessagesInput{
+		page, err := deps.MessageService.ListMessages(ctx, chat.ListMessagesInput{
 			UserID:   userID,
 			ChatID:   chatID,
 			Cursor:   cursor,
@@ -304,7 +305,7 @@ func handleRequest(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mute
 		}
 		reply(map[string]any{"items": page.Items, "next_cursor": page.NextCursor})
 	case "request.mark_read":
-		if deps.ChatService == nil {
+		if deps.MessageService == nil {
 			reply(map[string]any{"error": "service_unavailable"})
 			return
 		}
@@ -313,14 +314,14 @@ func handleRequest(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mute
 			reply(map[string]any{"error": "missing message_id"})
 			return
 		}
-		status, err := deps.ChatService.MarkMessageReadByID(ctx, userID, messageID)
+		status, err := deps.MessageService.MarkMessageReadByID(ctx, userID, messageID)
 		if err != nil {
 			reply(map[string]any{"error": err.Error()})
 			return
 		}
 		reply(map[string]any{"status": status})
 	case "request.send":
-		if deps.ChatService == nil {
+		if deps.MessageService == nil {
 			reply(map[string]any{"error": "service_unavailable"})
 			return
 		}
@@ -338,7 +339,7 @@ func handleRequest(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mute
 			reply(map[string]any{"error": "missing chat_id or content"})
 			return
 		}
-		msg, err := deps.ChatService.CreateMessage(ctx, chat.CreateMessageInput{
+		msg, err := deps.MessageService.CreateMessage(ctx, chat.CreateMessageInput{
 			UserID:           userID,
 			ChatID:           chatID,
 			Content:          content,
@@ -351,7 +352,7 @@ func handleRequest(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mute
 		}
 		reply(map[string]any{"message": msg})
 	case "request.react":
-		if deps.ChatService == nil {
+		if deps.MessageService == nil {
 			reply(map[string]any{"error": "service_unavailable"})
 			return
 		}
@@ -361,14 +362,14 @@ func handleRequest(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mute
 			reply(map[string]any{"error": "missing message_id or emoji"})
 			return
 		}
-		reactions, action, err := deps.ChatService.ToggleMessageReactionByID(ctx, userID, messageID, emoji)
+		reactions, action, err := deps.MessageService.ToggleMessageReactionByID(ctx, userID, messageID, emoji)
 		if err != nil {
 			reply(map[string]any{"error": err.Error()})
 			return
 		}
 		reply(map[string]any{"reactions": reactions, "action": action})
 	case "request.delete":
-		if deps.ChatService == nil {
+		if deps.MessageService == nil {
 			reply(map[string]any{"error": "service_unavailable"})
 			return
 		}
@@ -377,7 +378,7 @@ func handleRequest(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mute
 			reply(map[string]any{"error": "missing message_id"})
 			return
 		}
-		err := deps.ChatService.DeleteMessageByID(ctx, userID, messageID)
+		err := deps.MessageService.DeleteMessageByID(ctx, userID, messageID)
 		if err != nil {
 			reply(map[string]any{"error": err.Error()})
 			return

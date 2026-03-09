@@ -179,6 +179,17 @@ func (m *memSessionRepo) UpdateRefresh(_ context.Context, sessionID, refreshToke
 	return nil
 }
 
+func (m *memSessionRepo) UpdateExpiryByUser(_ context.Context, userID string, expiresAt time.Time) error {
+	for id, session := range m.sessions {
+		if session.UserID != userID {
+			continue
+		}
+		session.ExpiresAt = expiresAt
+		m.sessions[id] = session
+	}
+	return nil
+}
+
 func (m *memSessionRepo) DeleteByID(_ context.Context, sessionID string) error {
 	if _, ok := m.sessions[sessionID]; !ok {
 		return ErrSessionNotFound
@@ -338,5 +349,63 @@ func TestRefreshExtendsSessionUsingUserIdleTTL(t *testing.T) {
 	expected := base2.Add(30 * 24 * time.Hour)
 	if !session.ExpiresAt.Equal(expected) {
 		t.Fatalf("expected expires_at to be extended: got=%s expected=%s", session.ExpiresAt, expected)
+	}
+}
+
+func TestUpdateSessionIdleTTLAppliesToExistingSessions(t *testing.T) {
+	users := &memUserRepo{usersByLogin: map[string]User{}, usersByID: map[string]User{}}
+	sessions := &memSessionRepo{sessions: map[string]Session{}}
+
+	svc, err := New(Config{
+		Users:         users,
+		Sessions:      sessions,
+		AccessSecret:  "access-secret",
+		RefreshSecret: "refresh-secret",
+		AccessTTL:     15 * time.Minute,
+		RefreshTTL:    24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	svc.nowFn = func() time.Time { return base }
+
+	ctx := context.Background()
+	user, _, err := svc.Register(ctx, RegisterInput{
+		Email:     "user@example.com",
+		Username:  "user",
+		Password:  "StrongPassword123!",
+		FirstName: "User",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	var sessionBefore Session
+	for _, session := range sessions.sessions {
+		sessionBefore = session
+		break
+	}
+	if sessionBefore.ID == "" {
+		t.Fatalf("expected a session to exist after register")
+	}
+
+	thirtyDays := int64((30 * 24 * time.Hour) / time.Second)
+	base2 := base.Add(2 * time.Hour)
+	svc.nowFn = func() time.Time { return base2 }
+
+	updatedUser, err := svc.UpdateSessionIdleTTL(ctx, user.ID, &thirtyDays)
+	if err != nil {
+		t.Fatalf("update session idle ttl: %v", err)
+	}
+	if updatedUser.SessionIdleTTLSeconds == nil || *updatedUser.SessionIdleTTLSeconds != thirtyDays {
+		t.Fatalf("expected updated session ttl to be stored on user")
+	}
+
+	sessionAfter := sessions.sessions[sessionBefore.ID]
+	expected := base2.Add(30 * 24 * time.Hour)
+	if !sessionAfter.ExpiresAt.Equal(expected) {
+		t.Fatalf("expected existing session expires_at to update immediately: got=%s expected=%s", sessionAfter.ExpiresAt, expected)
 	}
 }

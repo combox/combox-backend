@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func (s *Service) EditMessage(ctx context.Context, input EditMessageInput) (Message, error) {
+func (s *MessageService) EditMessage(ctx context.Context, input EditMessageInput) (Message, error) {
 	userID := strings.TrimSpace(input.UserID)
 	chatID := strings.TrimSpace(input.ChatID)
 	messageID := strings.TrimSpace(input.MessageID)
@@ -15,13 +15,17 @@ func (s *Service) EditMessage(ctx context.Context, input EditMessageInput) (Mess
 		return Message{}, invalidArg("error.message.invalid_input")
 	}
 
-	if err := s.ensureChatMember(ctx, chatID, userID); err != nil {
-		return Message{}, err
-	}
-
 	chatMeta, err := s.chats.GetChat(ctx, chatID)
 	if err != nil {
 		return Message{}, mapChatOrMessageRepoError(err)
+	}
+	if err := s.standalone.ensureViewerAccess(ctx, &chatMeta, userID); err != nil {
+		return Message{}, err
+	}
+	if !isOpenStandaloneChannel(chatMeta) {
+		if err := s.ensureChatMember(ctx, chatID, userID); err != nil {
+			return Message{}, err
+		}
 	}
 	chatType, ok := normalizeChatType(chatMeta.Type)
 	if !ok {
@@ -30,16 +34,9 @@ func (s *Service) EditMessage(ctx context.Context, input EditMessageInput) (Mess
 	if chatType != ChatTypeStandard {
 		return Message{}, invalidArg("error.message.edit_not_allowed")
 	}
-	allowForeign := false
-	if strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "public_channel" {
-		role, err := s.chats.GetChatMemberRole(ctx, chatID, userID)
-		if err != nil {
-			return Message{}, internal(err)
-		}
-		if !canPostPublicChannelByRole(role) {
-			return Message{}, forbidden("error.chat.forbidden")
-		}
-		allowForeign = true
+	allowForeign, accessErr := s.standalone.ensureEditOrDeleteAllowed(ctx, chatMeta, userID)
+	if accessErr != nil {
+		return Message{}, accessErr
 	}
 
 	updated, repoErr := s.messages.UpdateMessageContent(ctx, chatID, messageID, userID, newContent, input.AttachmentIDs, allowForeign)
@@ -65,7 +62,7 @@ func (s *Service) EditMessage(ctx context.Context, input EditMessageInput) (Mess
 	return updated, nil
 }
 
-func (s *Service) MarkMessageReadByID(ctx context.Context, userID, messageID string) (MessageStatus, error) {
+func (s *MessageService) MarkMessageReadByID(ctx context.Context, userID, messageID string) (MessageStatus, error) {
 	userID = strings.TrimSpace(userID)
 	messageID = strings.TrimSpace(messageID)
 	if userID == "" || messageID == "" {
@@ -88,7 +85,7 @@ func (s *Service) MarkMessageReadByID(ctx context.Context, userID, messageID str
 	})
 }
 
-func (s *Service) EditMessageByID(ctx context.Context, userID, messageID, content string) (Message, error) {
+func (s *MessageService) EditMessageByID(ctx context.Context, userID, messageID, content string) (Message, error) {
 	userID = strings.TrimSpace(userID)
 	messageID = strings.TrimSpace(messageID)
 	content = strings.TrimSpace(content)
@@ -113,7 +110,7 @@ func (s *Service) EditMessageByID(ctx context.Context, userID, messageID, conten
 	})
 }
 
-func (s *Service) DeleteMessageByID(ctx context.Context, userID, messageID string) error {
+func (s *MessageService) DeleteMessageByID(ctx context.Context, userID, messageID string) error {
 	userID = strings.TrimSpace(userID)
 	messageID = strings.TrimSpace(messageID)
 	if userID == "" || messageID == "" {
@@ -128,13 +125,17 @@ func (s *Service) DeleteMessageByID(ctx context.Context, userID, messageID strin
 		return internal(err)
 	}
 
-	if err := s.ensureChatMember(ctx, meta.ChatID, userID); err != nil {
-		return err
-	}
-
 	chatMeta, err := s.chats.GetChat(ctx, meta.ChatID)
 	if err != nil {
 		return mapChatOrMessageRepoError(err)
+	}
+	if err := s.standalone.ensureViewerAccess(ctx, &chatMeta, userID); err != nil {
+		return err
+	}
+	if !isOpenStandaloneChannel(chatMeta) {
+		if err := s.ensureChatMember(ctx, meta.ChatID, userID); err != nil {
+			return err
+		}
 	}
 	chatType, ok := normalizeChatType(chatMeta.Type)
 	if !ok {
@@ -143,16 +144,9 @@ func (s *Service) DeleteMessageByID(ctx context.Context, userID, messageID strin
 	if chatType != ChatTypeStandard {
 		return invalidArg("error.message.edit_not_allowed")
 	}
-	allowForeign := false
-	if strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "public_channel" {
-		role, err := s.chats.GetChatMemberRole(ctx, meta.ChatID, userID)
-		if err != nil {
-			return internal(err)
-		}
-		if !canPostPublicChannelByRole(role) {
-			return forbidden("error.chat.forbidden")
-		}
-		allowForeign = true
+	allowForeign, accessErr := s.standalone.ensureEditOrDeleteAllowed(ctx, chatMeta, userID)
+	if accessErr != nil {
+		return accessErr
 	}
 
 	if err := s.messages.SoftDeleteMessage(ctx, meta.ChatID, meta.ID, userID, allowForeign); err != nil {
@@ -178,7 +172,7 @@ func (s *Service) DeleteMessageByID(ctx context.Context, userID, messageID strin
 	return nil
 }
 
-func (s *Service) ForwardMessage(ctx context.Context, input ForwardMessageInput) (Message, error) {
+func (s *MessageService) ForwardMessage(ctx context.Context, input ForwardMessageInput) (Message, error) {
 	userID := strings.TrimSpace(input.UserID)
 	chatID := strings.TrimSpace(input.ChatID)
 	sourceMessageID := strings.TrimSpace(input.SourceMessageID)
@@ -225,7 +219,7 @@ func (s *Service) ForwardMessage(ctx context.Context, input ForwardMessageInput)
 	return created, nil
 }
 
-func (s *Service) ToggleMessageReactionByID(ctx context.Context, userID, messageID, emoji string) ([]MessageReaction, string, error) {
+func (s *MessageService) ToggleMessageReactionByID(ctx context.Context, userID, messageID, emoji string) ([]MessageReaction, string, error) {
 	userID = strings.TrimSpace(userID)
 	messageID = strings.TrimSpace(messageID)
 	emoji = strings.TrimSpace(emoji)
@@ -241,33 +235,29 @@ func (s *Service) ToggleMessageReactionByID(ctx context.Context, userID, message
 		return nil, "", internal(err)
 	}
 
-	if err := s.ensureChatMember(ctx, meta.ChatID, userID); err != nil {
-		return nil, "", err
-	}
 	chatMeta, chatErr := s.chats.GetChat(ctx, meta.ChatID)
 	if chatErr != nil {
 		return nil, "", mapChatOrMessageRepoError(chatErr)
 	}
-	if strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "public_channel" {
-		role, roleErr := s.chats.GetChatMemberRole(ctx, meta.ChatID, userID)
-		if roleErr != nil {
-			if errors.Is(roleErr, ErrChatNotFound) {
-				return nil, "", forbidden("error.chat.forbidden")
-			}
-			return nil, "", internal(roleErr)
+	if err := s.standalone.ensureViewerAccess(ctx, &chatMeta, userID); err != nil {
+		return nil, "", err
+	}
+	if !isOpenStandaloneChannel(chatMeta) {
+		if err := s.ensureChatMember(ctx, meta.ChatID, userID); err != nil {
+			return nil, "", err
 		}
-		if !canReactPublicChannelByRole(role) {
-			return nil, "", forbidden("error.chat.forbidden")
-		}
+	}
+	if err := s.standalone.ensureReactionAllowed(ctx, chatMeta, userID); err != nil {
+		return nil, "", err
 	}
 
 	reactions, action, err := s.messages.ToggleMessageReaction(ctx, meta.ChatID, meta.ID, userID, emoji)
 	if err != nil {
 		return nil, "", mapChatOrMessageRepoError(err)
 	}
-	sanitized := sanitizeMessageReactionsForViewer(chatMeta, Message{
-		ID:      meta.ID,
-		ChatID:  meta.ChatID,
+	sanitized := s.standalone.sanitizeReactions(chatMeta, Message{
+		ID:        meta.ID,
+		ChatID:    meta.ChatID,
 		Reactions: reactions,
 	})
 	if strings.TrimSpace(meta.ReplyToMessageID) != "" {

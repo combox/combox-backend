@@ -8,6 +8,7 @@ coverage/
 *.log
 *.out
 *.test
+.gocache
 
 .DS_Store
 Thumbs.db

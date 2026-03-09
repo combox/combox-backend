@@ -207,10 +207,36 @@ func (r *MediaRepository) CanUserAccessAttachment(ctx context.Context, userID, a
 			FROM attachments a
 			INNER JOIN messages m
 				ON m.content LIKE ('%[[att:' || a.id::text || '|%')
-			INNER JOIN chat_members cm
-				ON cm.chat_id = m.chat_id
+			LEFT JOIN standalone_channels pc
+				ON pc.chat_id = m.chat_id
 			WHERE a.id = $1::uuid
-			  AND cm.user_id = $2::uuid
+			  AND (
+			       EXISTS (
+			         SELECT 1
+			         FROM chat_members cm
+			         WHERE cm.chat_id = m.chat_id
+			           AND cm.user_id = $2::uuid
+			           AND cm.role <> 'banned'
+			       )
+			       OR EXISTS (
+			         SELECT 1
+			         FROM standalone_channel_members pcm
+			         WHERE pcm.chat_id = m.chat_id
+			           AND pcm.user_id = $2::uuid
+			           AND pcm.role <> 'banned'
+			       )
+			       OR (
+			         pc.chat_id IS NOT NULL
+			         AND pc.is_public = TRUE
+			         AND NOT EXISTS (
+			           SELECT 1
+			           FROM standalone_channel_members pcm_banned
+			           WHERE pcm_banned.chat_id = m.chat_id
+			             AND pcm_banned.user_id = $2::uuid
+			             AND pcm_banned.role = 'banned'
+			         )
+			       )
+			  )
 		)
 	`
 	var allowed bool

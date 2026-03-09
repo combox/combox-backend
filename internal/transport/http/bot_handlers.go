@@ -19,7 +19,7 @@ type botCreateMessageRequest struct {
 	AttachmentIDs []string `json:"attachment_ids"`
 }
 
-func newPublicBotMessagesHandler(chat ChatService, i18n Translator, defaultLocale string) http.HandlerFunc {
+func newPublicBotMessagesHandler(messages MessageService, i18n Translator, defaultLocale string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, r, i18n, defaultLocale)
@@ -51,7 +51,7 @@ func newPublicBotMessagesHandler(chat ChatService, i18n Translator, defaultLocal
 			return
 		}
 
-		created, err := chat.CreateMessage(r.Context(), chatsvc.CreateMessageInput{
+		created, err := messages.CreateMessage(r.Context(), chatsvc.CreateMessageInput{
 			BotID:         principal.BotID,
 			ChatID:        chatID,
 			Content:       req.Content,
@@ -87,7 +87,7 @@ func botChatIDFromPath(path string) (string, bool) {
 	return parts[0], true
 }
 
-func newPublicBotChatMessagesHandler(chat ChatService, i18n Translator, defaultLocale string) http.HandlerFunc {
+func newPublicBotChatMessagesHandler(messages MessageService, i18n Translator, defaultLocale string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w, r, i18n, defaultLocale)
@@ -124,7 +124,7 @@ func newPublicBotChatMessagesHandler(chat ChatService, i18n Translator, defaultL
 			limit = parsed
 		}
 
-		page, err := chat.ListMessages(r.Context(), chatsvc.ListMessagesInput{
+		page, err := messages.ListMessages(r.Context(), chatsvc.ListMessagesInput{
 			UserID: principal.UserID,
 			ChatID: chatID,
 			Limit:  limit,

@@ -13,7 +13,11 @@ import (
 )
 
 func (s *Service) uploadAvatarDataURL(ctx context.Context, raw string) (string, error) {
-	if s.avatars == nil {
+	return uploadAvatarDataURL(ctx, s.avatars, raw)
+}
+
+func uploadAvatarDataURL(ctx context.Context, store AvatarStore, raw string) (string, error) {
+	if store == nil {
 		return "", errors.New("avatar store is not configured")
 	}
 	contentType, payload, err := decodeDataURL(raw)
@@ -21,7 +25,7 @@ func (s *Service) uploadAvatarDataURL(ctx context.Context, raw string) (string, 
 		return "", err
 	}
 	objectKey := fmt.Sprintf("chat-avatars/%s%s", uuid.NewString(), extensionByContentType(contentType))
-	if err := s.avatars.PutObject(ctx, objectKey, contentType, bytes.NewReader(payload), int64(len(payload))); err != nil {
+	if err := store.PutObject(ctx, objectKey, contentType, bytes.NewReader(payload), int64(len(payload))); err != nil {
 		return "", err
 	}
 	return objectKey, nil

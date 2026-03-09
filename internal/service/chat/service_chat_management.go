@@ -104,7 +104,7 @@ func canCreateChannelByRole(role string) bool {
 	}
 }
 
-func canPostPublicChannelByRole(role string) bool {
+func canPostStandaloneChannelByRole(role string) bool {
 	switch strings.TrimSpace(strings.ToLower(role)) {
 	case "owner", "admin":
 		return true
@@ -113,7 +113,7 @@ func canPostPublicChannelByRole(role string) bool {
 	}
 }
 
-func canViewPublicChannelMembersByRole(role string) bool {
+func canViewStandaloneChannelMembersByRole(role string) bool {
 	switch strings.TrimSpace(strings.ToLower(role)) {
 	case "owner", "admin":
 		return true
@@ -146,7 +146,7 @@ func normalizePublicSlug(raw string) string {
 	return slug
 }
 
-func (s *Service) CreatePublicChannel(ctx context.Context, input CreatePublicChannelInput) (Chat, error) {
+func (s *Service) CreateStandaloneChannel(ctx context.Context, input CreateStandaloneChannelInput) (Chat, error) {
 	userID := strings.TrimSpace(input.UserID)
 	title := strings.TrimSpace(input.Title)
 	publicSlug := normalizePublicSlug(input.PublicSlug)
@@ -160,7 +160,7 @@ func (s *Service) CreatePublicChannel(ctx context.Context, input CreatePublicCha
 		publicSlug = ""
 	}
 
-	created, err := s.chats.CreatePublicChannel(ctx, title, publicSlug, userID, input.IsPublic)
+	created, err := s.chats.CreateStandaloneChannel(ctx, title, publicSlug, userID, input.IsPublic)
 	if err != nil {
 		return Chat{}, internal(err)
 	}
@@ -324,12 +324,12 @@ func (s *Service) ListMembers(ctx context.Context, userID, chatID string, includ
 	if err != nil {
 		return nil, mapChatOrMessageRepoError(err)
 	}
-	if strings.TrimSpace(strings.ToLower(target.Kind)) == "public_channel" {
+	if strings.TrimSpace(strings.ToLower(target.Kind)) == "standalone_channel" {
 		role, err := s.chats.GetChatMemberRole(ctx, chatID, userID)
 		if err != nil {
 			return nil, internal(err)
 		}
-		if !canViewPublicChannelMembersByRole(role) {
+		if !canViewStandaloneChannelMembersByRole(role) {
 			return nil, forbidden("error.chat.forbidden")
 		}
 	}
@@ -341,7 +341,7 @@ func (s *Service) ListMembers(ctx context.Context, userID, chatID string, includ
 	return items, nil
 }
 
-func (s *Service) SubscribePublicChannel(ctx context.Context, userID, chatID string) (Chat, error) {
+func (s *Service) SubscribeChannel(ctx context.Context, userID, chatID string) (Chat, error) {
 	userID = strings.TrimSpace(userID)
 	chatID = strings.TrimSpace(chatID)
 	if userID == "" || chatID == "" {
@@ -352,7 +352,7 @@ func (s *Service) SubscribePublicChannel(ctx context.Context, userID, chatID str
 	if err != nil {
 		return Chat{}, mapChatOrMessageRepoError(err)
 	}
-	if strings.TrimSpace(strings.ToLower(target.Kind)) != "public_channel" || !target.IsPublic {
+	if strings.TrimSpace(strings.ToLower(target.Kind)) != "standalone_channel" || !target.IsPublic {
 		return Chat{}, invalidArg("error.chat.invalid_input")
 	}
 
@@ -383,7 +383,7 @@ func (s *Service) SubscribePublicChannel(ctx context.Context, userID, chatID str
 	return updated, nil
 }
 
-func (s *Service) UnsubscribePublicChannel(ctx context.Context, userID, chatID string) error {
+func (s *Service) UnsubscribeChannel(ctx context.Context, userID, chatID string) error {
 	userID = strings.TrimSpace(userID)
 	chatID = strings.TrimSpace(chatID)
 	if userID == "" || chatID == "" {
@@ -394,7 +394,7 @@ func (s *Service) UnsubscribePublicChannel(ctx context.Context, userID, chatID s
 	if err != nil {
 		return mapChatOrMessageRepoError(err)
 	}
-	if strings.TrimSpace(strings.ToLower(target.Kind)) != "public_channel" || !target.IsPublic {
+	if strings.TrimSpace(strings.ToLower(target.Kind)) != "standalone_channel" || !target.IsPublic {
 		return invalidArg("error.chat.invalid_input")
 	}
 
@@ -495,7 +495,7 @@ func (s *Service) UpdateMemberRole(ctx context.Context, actorUserID, chatID, tar
 	}
 	validRole := false
 	switch strings.TrimSpace(strings.ToLower(target.Kind)) {
-	case "public_channel":
+	case "standalone_channel":
 		switch role {
 		case "subscriber", "admin", "banned":
 			validRole = true
