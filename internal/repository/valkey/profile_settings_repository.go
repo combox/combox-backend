@@ -13,8 +13,8 @@ type ProfileSettings struct {
 }
 
 type ChatNotifications struct {
-	MutedChatIDs  []string
-	UnreadByChat  map[string]int
+	MutedChatIDs []string
+	UnreadByChat map[string]int
 }
 
 type ProfileSettingsRepository struct {

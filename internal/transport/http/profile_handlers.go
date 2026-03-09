@@ -9,13 +9,13 @@ import (
 )
 
 type profileUpdateRequest struct {
-	Username       *string `json:"username"`
-	FirstName      *string `json:"first_name"`
-	LastName       *string `json:"last_name"`
-	BirthDate      *string `json:"birth_date"`
-	AvatarDataURL  *string `json:"avatar_data_url"`
-	AvatarGradient *string `json:"avatar_gradient"`
-	SessionIdleTTLSeconds *int64 `json:"session_idle_ttl_seconds"`
+	Username              *string `json:"username"`
+	FirstName             *string `json:"first_name"`
+	LastName              *string `json:"last_name"`
+	BirthDate             *string `json:"birth_date"`
+	AvatarDataURL         *string `json:"avatar_data_url"`
+	AvatarGradient        *string `json:"avatar_gradient"`
+	SessionIdleTTLSeconds *int64  `json:"session_idle_ttl_seconds"`
 }
 
 type profilePasswordRequest struct {
