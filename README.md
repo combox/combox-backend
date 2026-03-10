@@ -1,7 +1,7 @@
 # ComBox Backend
 
 ![banner](.github/assets/banner.png)
-
+[![Code Quality](https://github.com/combox/combox-backend/actions/workflows/security.yml/badge.svg)](https://github.com/combox/combox-backend/actions/workflows/security.yml)
 [English](./README.md) | [Русский](./README.ru.md)
 
 Backend service for ComBox. It exposes private/public HTTP APIs, WebSocket realtime transport, auth/session flows, chat and channel logic, media storage integration, search, bot integrations, and edge-ready deployment with mTLS.
