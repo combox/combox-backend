@@ -45,3 +45,6 @@ edge-down:
 
 edge-logs:
 	$(EDGE_DC) logs -f --tail=120 combox-backend
+
+commit:
+	node scripts/commit.js "$(branch)" "$(message)"

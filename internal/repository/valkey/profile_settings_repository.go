@@ -165,6 +165,18 @@ func (r *ProfileSettingsRepository) SetChatMuted(ctx context.Context, userID, ch
 	return r.c.Client().SRem(ctx, key, chatID).Err()
 }
 
+func (r *ProfileSettingsRepository) IsChatMuted(ctx context.Context, userID, chatID string) (bool, error) {
+	if r == nil || r.c == nil {
+		return false, nil
+	}
+	userID = strings.TrimSpace(userID)
+	chatID = strings.TrimSpace(chatID)
+	if userID == "" || chatID == "" {
+		return false, nil
+	}
+	return r.c.Client().SIsMember(ctx, mutedChatsKey(userID), chatID).Result()
+}
+
 func (r *ProfileSettingsRepository) ListMutedChatIDs(ctx context.Context, userID string) ([]string, error) {
 	if r == nil || r.c == nil || strings.TrimSpace(userID) == "" {
 		return []string{}, nil

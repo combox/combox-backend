@@ -121,7 +121,11 @@ func (c *Client) PresignGetObject(ctx context.Context, objectKey string, expires
 	if c == nil || c.c == nil {
 		return "", nil
 	}
-	u, err := c.c.PresignedGetObject(ctx, c.bucket, strings.TrimSpace(objectKey), expires, nil)
+	// Cache media aggressively in the browser: object keys are immutable in our model (new key per upload).
+	// Using `response-cache-control` makes MinIO include Cache-Control on the GET response.
+	params := make(url.Values)
+	params.Set("response-cache-control", "public, max-age=31536000, immutable")
+	u, err := c.c.PresignedGetObject(ctx, c.bucket, strings.TrimSpace(objectKey), expires, params)
 	if err != nil {
 		return "", err
 	}

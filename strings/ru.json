@@ -69,7 +69,11 @@
   "error.media.mkv_as_file_only": "mkv must be uploaded as file kind",
   "mail.auth.email_code.subject": "Combox: код подтверждения",
   "mail.auth.email_code.text": "Код подтверждения: %s`nEmail: %s`nКод действует до %s UTC.`n`nЕсли это были не вы, просто проигнорируйте это письмо.",
-  "mail.auth.email_code.html": "<div style=\"background:#0b1220;border:1px solid #24344f;border-radius:16px;padding:20px;color:#e8edff;font-family:Arial,sans-serif\"><p style=\"margin:0 0 10px 0;font-size:14px;opacity:.85\">Combox</p><p style=\"margin:0 0 8px 0;font-size:14px;opacity:.85\">Код подтверждения</p><p style=\"margin:0 0 14px 0;font-size:34px;letter-spacing:6px;font-weight:700\">%s</p><p style=\"margin:0 0 8px 0;font-size:14px\">Email: <b>%s</b></p><p style=\"margin:0 0 8px 0;font-size:14px\">Код действует до %s UTC.</p><p style=\"margin:12px 0 0 0;font-size:12px;opacity:.8\">Если это были не вы, просто проигнорируйте это письмо.</p></div>",
+  "mail.auth.email_code.headline": "Введите этот временный код подтверждения, чтобы продолжить:",
+  "mail.auth.email_code.valid_until": "Код действует до %s UTC.",
+  "mail.auth.email_code.ignore": "Если это были не вы, просто проигнорируйте это письмо.",
+  "mail.auth.email_code.email_line": "Email: %s",
+  "mail.auth.email_code.signoff": "С уважением,<br/>Команда ComBox",
   "error.auth.email_code_required": "сначала подтвердите код из email",
   "error.auth.login_key_required": "ключ подтверждения входа отсутствует",
   "error.auth.login_key_invalid": "ключ подтверждения входа недействителен или истек"
