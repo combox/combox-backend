@@ -36,9 +36,9 @@ import (
 )
 
 type chatPublisherAdapter struct {
-	p      *vkrepo.EventPublisher
+	p        *vkrepo.EventPublisher
 	settings *vkrepo.ProfileSettingsRepository
-	logger *slog.Logger
+	logger   *slog.Logger
 }
 
 func (a chatPublisherAdapter) PublishDeviceMessageCreated(ctx context.Context, ev chatsvc.DeviceMessageCreatedEvent) error {
