@@ -36,8 +36,9 @@ import (
 )
 
 type chatPublisherAdapter struct {
-	p      *vkrepo.EventPublisher
-	logger *slog.Logger
+	p        *vkrepo.EventPublisher
+	settings *vkrepo.ProfileSettingsRepository
+	logger   *slog.Logger
 }
 
 func (a chatPublisherAdapter) PublishDeviceMessageCreated(ctx context.Context, ev chatsvc.DeviceMessageCreatedEvent) error {
@@ -77,9 +78,18 @@ func (a chatPublisherAdapter) PublishUserMessageCreated(ctx context.Context, ev 
 		RecipientUserID: ev.RecipientUserID,
 		CreatedAt:       ev.CreatedAt,
 	})
+	// We always publish notification events, but mark muted chats so clients can suppress
+	// sound/desktop notifications while still showing unread counters.
+	muted := false
+	if a.settings != nil {
+		if isMuted, checkErr := a.settings.IsChatMuted(ctx, ev.RecipientUserID, ev.ChatID); checkErr == nil && isMuted {
+			muted = true
+		}
+	}
 	_ = a.p.PublishNotification(ctx, vkrepo.NotificationEvent{
 		UserID:    ev.RecipientUserID,
 		Kind:      "message.created",
+		Muted:     muted,
 		Payload:   map[string]string{"chat_id": ev.ChatID, "message_id": ev.MessageID, "sender_user_id": ev.SenderUserID},
 		CreatedAt: ev.CreatedAt,
 	})
@@ -337,7 +347,7 @@ func Run(ctx context.Context) error {
 	emailChangeRepo := vkrepo.NewEmailChangeRepository(valkeyClient)
 	chatInviteRepo := vkrepo.NewChatInviteRepository(valkeyClient)
 
-	chatPublisher := &chatPublisherAdapter{p: publisher, logger: logger}
+	chatPublisher := &chatPublisherAdapter{p: publisher, settings: profileRepo, logger: logger}
 	chatSvc, err := chatsvc.NewWithPublisherAndStatusRepo(chatRepo, msgRepo, chatPublisher, statusRepo)
 	if err != nil {
 		return fmt.Errorf("init chat service: %w", err)

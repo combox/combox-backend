@@ -361,22 +361,96 @@ func randomDigits(n int) (string, error) {
 
 func (s *Service) messageForLocale(locale, code string, expiresAt time.Time, email string) (string, string, string) {
 	expiry := expiresAt.Format("15:04")
-	subject := s.translatef(locale, "mail.auth.email_code.subject", "Combox: verification code")
+	subject := s.translatef(locale, "mail.auth.email_code.subject", "ComBox: verification code")
 	text := s.translatef(
 		locale,
 		"mail.auth.email_code.text",
-		"Your verification code: %s\nEmail: %s\nValid until %s UTC.\n\nIf this wasn't you, ignore this email.",
+		"Enter this temporary verification code to continue:\n\n%s\n\nValid until %s UTC.\nIf this wasn't you, ignore this email.",
 		code,
-		email,
 		expiry,
 	)
-	html := s.translatef(
-		locale,
-		"mail.auth.email_code.html",
-		`<div style="background:#0b1220;border:1px solid #24344f;border-radius:16px;padding:20px;color:#e8edff;font-family:Arial,sans-serif"><p style="margin:0 0 10px 0;font-size:14px;opacity:.85">Combox</p><p style="margin:0 0 8px 0;font-size:14px;opacity:.85">Verification code</p><p style="margin:0 0 14px 0;font-size:34px;letter-spacing:6px;font-weight:700">%s</p><p style="margin:0 0 8px 0;font-size:14px">Email: <b>%s</b></p><p style="margin:0 0 8px 0;font-size:14px">Valid until %s UTC.</p><p style="margin:12px 0 0 0;font-size:12px;opacity:.8">If this wasn't you, ignore this email.</p></div>`,
+	headline := s.translatef(locale, "mail.auth.email_code.headline", "Enter this temporary verification code to continue:")
+	validUntil := s.translatef(locale, "mail.auth.email_code.valid_until", "Valid until %s UTC.", expiry)
+	ignore := s.translatef(locale, "mail.auth.email_code.ignore", "Please ignore this email if this wasn't you trying to sign in to ComBox.")
+	emailLine := s.translatef(locale, "mail.auth.email_code.email_line", "Email: %s", email)
+	signoff := s.translatef(locale, "mail.auth.email_code.signoff", "Best,<br/>The ComBox team")
+
+	// Keep HTML style consistent across locales (tweb-like/OpenAI-like),
+	// translate only small strings to avoid embedding full HTML in i18n JSON files.
+	html := fmt.Sprintf(
+		`<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ComBox verification code</title>
+    <style type="text/css">
+      /* Email client reset */
+      img { border: 0; height: auto; outline: 0; text-decoration: none; }
+      table { border-collapse: collapse !important; }
+      body { margin: 0; padding: 0; width: 100%% !important; height: 100%% !important; }
+      #bodyCell { padding: 20px; }
+      #bodyTable { width: 560px; }
+      @media only screen and (max-width: 480px) {
+        #bodyCell, #bodyTable, body { width: 100%% !important; }
+        #bodyTable { max-width: 560px !important; }
+      }
+    </style>
+  </head>
+  <body style="background-color:#ffffff;">
+    <center>
+      <table id="bodyTable" align="center" border="0" cellpadding="0" cellspacing="0" width="100%%"
+        style="width:560px;margin:0;padding:0;background-color:#ffffff;">
+        <tr>
+          <td id="bodyCell" align="center" valign="top" style="padding:0 16px;">
+            <table border="0" cellpadding="0" cellspacing="0" width="100%%" style="width:100%%;">
+              <tr>
+                <td style="padding:56px 0 22px 0;text-align:left;font-family:Roboto,Helvetica,Arial,sans-serif;">
+                  <div style="font-size:28px;font-weight:800;color:#0b0f17;letter-spacing:0.2px;">ComBox</div>
+                </td>
+              </tr>
+              <tr>
+                <td style="text-align:left;font-family:Roboto,Helvetica,Arial,sans-serif;color:#334155;">
+                  <p style="font-size:16px;line-height:24px;margin:0;color:#202123;">
+                    %s
+                  </p>
+                  <p style="font-family:Menlo,Monaco,Consolas,Lucida Console,monospace;font-size:24px;line-height:28px;background-color:#F3F3F3;color:#5D5D5D;border-radius:16px;padding:28px 24px;margin:24px 0;">
+                    %s
+                  </p>
+                  <p style="font-size:16px;line-height:24px;margin:0;color:#353740;">
+                    %s
+                  </p>
+                  <p style="font-size:16px;line-height:24px;margin:16px 0 0 0;color:#353740;">
+                    %s
+                  </p>
+                  <p style="font-size:12px;line-height:16px;margin:16px 0 0 0;color:#8F8F8F;">
+                    %s
+                  </p>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:32px 0 0 0;">
+                  <div style="height:1px;background:#e5e7eb;width:100%%;"></div>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:18px 0 44px 0;text-align:left;font-family:Roboto,Helvetica,Arial,sans-serif;color:#94a3b8;font-size:12px;line-height:16px;">
+                  %s
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </center>
+  </body>
+</html>`,
+		headline,
 		code,
-		email,
-		expiry,
+		validUntil,
+		ignore,
+		emailLine,
+		signoff,
 	)
 	return subject, html, text
 }

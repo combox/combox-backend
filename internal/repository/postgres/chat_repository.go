@@ -310,7 +310,12 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 		       END AS subscriber_count,
 		       CASE WHEN c.is_direct THEN peer.avatar_data_url ELSE c.avatar_data_url END,
 		       CASE WHEN c.is_direct THEN peer.avatar_gradient ELSE c.avatar_gradient END,
-		       latest.content,
+		       CASE
+		         WHEN latest.content IS NULL THEN NULL
+		         WHEN c.is_direct THEN latest.content
+		         WHEN c.chat_kind = 'group' THEN CONCAT(latest.sender_name, ': ', latest.content)
+		         ELSE latest.content
+		       END AS last_message_preview,
 		       c.created_at
 		FROM chats c
 		INNER JOIN chat_members cm ON cm.chat_id = c.id
@@ -324,8 +329,11 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 			LIMIT 1
 		) peer ON c.is_direct = TRUE
 		LEFT JOIN LATERAL (
-			SELECT m.content
+			SELECT
+				m.content,
+				COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), u.username, 'Unknown') AS sender_name
 			FROM messages m
+			LEFT JOIN users u ON u.id = m.user_id
 			WHERE m.chat_id = c.id
 			  AND m.deleted_at IS NULL
 			ORDER BY m.created_at DESC
@@ -333,7 +341,7 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 		) latest ON TRUE
 		WHERE cm.user_id = $1::uuid
 		  AND cm.role <> 'banned'
-		  AND c.chat_kind <> 'channel'
+		  AND (c.chat_kind <> 'channel' OR c.parent_chat_id IS NULL)
 		  AND (c.is_direct = FALSE OR peer.id IS NOT NULL)
 		ORDER BY c.created_at DESC
 	`

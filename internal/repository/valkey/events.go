@@ -104,6 +104,7 @@ type NotificationEvent struct {
 	Type      string    `json:"type"`
 	UserID    string    `json:"user_id"`
 	Kind      string    `json:"kind"`
+	Muted     bool      `json:"muted,omitempty"`
 	Payload   any       `json:"payload"`
 	CreatedAt time.Time `json:"created_at"`
 }
