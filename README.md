@@ -1,6 +1,7 @@
 # ComBox Backend
 
 ![banner](.github/assets/banner.png)
+
 [![CodeQuality](https://github.com/combox/combox-backend/actions/workflows/security.yml/badge.svg)](https://github.com/combox/combox-backend/actions/workflows/security.yml)
 
 [English](./README.md) | [Русский](./README.ru.md)
