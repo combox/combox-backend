@@ -2,6 +2,8 @@
 
 ![banner](.github/assets/banner.png)
 
+[![CodeQuality](https://github.com/combox/combox-backend/actions/workflows/security.yml/badge.svg)](https://github.com/combox/combox-backend/actions/workflows/security.yml)
+
 [English](./README.md) | [Русский](./README.ru.md)
 
 Бэкенд-сервис для ComBox. Он отдаёт приватный и публичный HTTP API, WebSocket realtime-транспорт, auth/session flows, логику чатов и каналов, интеграцию с медиа-хранилищем, поиск, bot integrations и готов для edge-развёртывания с mTLS.

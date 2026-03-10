@@ -31,7 +31,8 @@ if (current === 'HEAD') {
 }
 
 if (current === 'main' || current === 'master') {
-  const branchExists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { stdio: 'ignore' }).status === 0
+  const branchExists =
+    spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { stdio: 'ignore' }).status === 0
   runGit(branchExists ? ['switch', branch] : ['switch', '-c', branch])
 } else if (current !== branch) {
   console.error(`Current branch is '${current}'. Use branch=${current} or switch manually.`)
