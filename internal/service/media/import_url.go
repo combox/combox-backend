@@ -5,10 +5,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,13 @@ const (
 	importURLTimeout  = 30 * time.Second
 	maxImportURLBytes = int64(64 * 1024 * 1024)
 )
+
+var importURLClient = &http.Client{
+	Timeout: importURLTimeout,
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 type ImportFromURLInput struct {
 	UserID    string
@@ -131,6 +140,103 @@ func sanitizeFilename(name string) string {
 	return safe
 }
 
+func isBlockedImportHost(hostname string) bool {
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	if hostname == "" {
+		return true
+	}
+	if hostname == "localhost" {
+		return true
+	}
+	if strings.HasSuffix(hostname, ".local") {
+		return true
+	}
+	if strings.HasSuffix(hostname, ".internal") {
+		return true
+	}
+	return false
+}
+
+func isPrivateOrLocalIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip.IsPrivate() {
+		return true
+	}
+	// IPv4: 0.0.0.0/8 and 100.64.0.0/10
+	if v4 := ip.To4(); v4 != nil {
+		a := v4[0]
+		b := v4[1]
+		if a == 0 {
+			return true
+		}
+		if a == 100 && b >= 64 && b <= 127 {
+			return true
+		}
+	}
+	return false
+}
+
+func validateImportURL(ctx context.Context, parsed *url.URL) error {
+	if parsed == nil {
+		return fmt.Errorf("invalid url")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("invalid scheme")
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return fmt.Errorf("invalid host")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("userinfo not allowed")
+	}
+	if strings.TrimSpace(parsed.Fragment) != "" {
+		return fmt.Errorf("fragment not allowed")
+	}
+
+	hostname := strings.TrimSpace(parsed.Hostname())
+	if isBlockedImportHost(hostname) {
+		return fmt.Errorf("blocked host")
+	}
+
+	// Block direct IP literals.
+	if ip := net.ParseIP(hostname); ip != nil {
+		if isPrivateOrLocalIP(ip) {
+			return fmt.Errorf("blocked ip")
+		}
+	}
+
+	// Block dangerous ports (allow 80/443 only).
+	if port := strings.TrimSpace(parsed.Port()); port != "" {
+		p, err := strconv.Atoi(port)
+		if err != nil {
+			return fmt.Errorf("invalid port")
+		}
+		if p != 80 && p != 443 {
+			return fmt.Errorf("blocked port")
+		}
+	}
+
+	// Resolve DNS and block private/local ranges.
+	addrs, err := net.DefaultResolver.LookupIP(ctx, "ip", hostname)
+	if err != nil {
+		return fmt.Errorf("dns lookup failed")
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("no dns results")
+	}
+	for _, ip := range addrs {
+		if isPrivateOrLocalIP(ip) {
+			return fmt.Errorf("blocked ip")
+		}
+	}
+	return nil
+}
+
 func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (GetAttachmentOutput, error) {
 	userID := strings.TrimSpace(input.UserID)
 	sourceURL := normalizeImportSourceURL(input.SourceURL)
@@ -143,6 +249,9 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || strings.TrimSpace(parsedURL.Host) == "" {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
+	if err := validateImportURL(ctx, parsedURL); err != nil {
+		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, importURLTimeout)
 	defer cancel()
@@ -152,7 +261,7 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 	}
 	req.Header.Set("User-Agent", "combox-backend-media-import/1.0")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := importURLClient.Do(req)
 	if err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
 	}
