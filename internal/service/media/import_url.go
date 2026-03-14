@@ -22,6 +22,85 @@ const (
 	maxImportURLBytes = int64(64 * 1024 * 1024)
 )
 
+var importURLLookupIP = func(ctx context.Context, network, host string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(ctx, network, host)
+}
+
+var allowedImportHostSuffixes = []string{
+	// GIFs & Media
+	"giphy.com", "media.giphy.com", "giphy.me",
+	"tenor.com", "media.tenor.com", "media1.tenor.com",
+	"imgur.com", "i.imgur.com",
+	"gfycat.com", "thumbs.gfycat.com",
+
+	// Social Media & Video
+	"youtube.com", "youtu.be", "m.youtube.com", "www.youtube.com",
+	"github.com", "githubusercontent.com", "githubassets.com", "raw.githubusercontent.com",
+	"twitter.com", "x.com", "twimg.com", "pbs.twimg.com",
+	"instagram.com", "cdninstagram.com",
+	"facebook.com", "fbcdn.net",
+	"tiktok.com", "v.tiktok.com",
+	"reddit.com", "redditmedia.com", "redd.it", "i.redd.it", "v.redd.it",
+	"discord.gg", "discordapp.com", "discordapp.net", "cdn.discordapp.com",
+	"vimeo.com", "vimeocdn.com",
+	"twitch.tv", "static-cdn.jtvnw.net",
+	"linkedin.com", "licdn.com",
+	"pinterest.com", "pinimg.com",
+
+	// News & Articles (Major International)
+	"reuters.com", "apnews.com", "bloomberg.com",
+	"nytimes.com", "wsj.com", "wsj.net",
+	"bbc.com", "bbc.co.uk", "bbci.co.uk",
+	"cnn.com", "cnn.io",
+	"theguardian.com", "guim.co.uk",
+	"aljazeera.com",
+	"forbes.com",
+	"economist.com",
+	"theatlantic.com",
+	"newyorker.com",
+	"nature.com",
+	"science.org",
+	"nationalgeographic.com",
+
+	// Music & Audio
+	"spotify.com", "scdn.co", "soundcloud.com", "sndcdn.com",
+	"music.apple.com", "itunes.apple.com", "deezer.com", "dzcdn.net",
+	"tidal.com", "bandcamp.com",
+
+	// Movies & Streaming
+	"netflix.com", "nflxso.net", "disneyplus.com", "disney.com",
+	"hbo.com", "hbomax.com", "max.com", "primevideo.com",
+	"apple.com/apple-tv-plus", "hulu.com", "imdb.com",
+
+	// European News
+	"lemonde.fr", "lefigaro.fr", "spiegel.de", "zeit.de", "dw.com",
+	"elpais.com", "elmundo.es", "corriere.it", "repubblica.it",
+	"euronews.com", "politico.eu", "france24.com",
+
+	// Ukrainian News & Portals
+	"pravda.com.ua", "unian.net", "ukrinform.ua", "tsn.ua", "nv.ua",
+	"censor.net", "rbc.ua", "gordonua.com", "korrespondent.net",
+	"interfax.com.ua", "suspilne.media", "babel.ua",
+
+	// Russian-segment & Blogs
+	"telegra.ph", "pikabu.ru", "meduza.io", "meduza.care",
+	"tjournal.ru", "vc.ru", "habr.com", "dtf.ru",
+	"rbc.ru", "kommersant.ru", "lenta.ru", "gazeta.ru",
+	"vedomosti.ru", "ria.ru", "tass.ru",
+	"snob.ru", "echo.msk.ru", "tvrain.ru", "novayagazeta.ru",
+	"dzen.ru", "yandex.ru", "yastatic.net",
+	"vk.com", "vk.me", "vk-cdn.net", "ok.ru",
+
+	// Tech News & Gaming
+	"techcrunch.com", "theverge.com", "wired.com",
+	"arstechnica.com", "engadget.com", "gizmodo.com",
+	"medium.com", "substack.com", "dev.to",
+	"ign.com", "gamespot.com", "kotaku.com", "polygon.com", "eurogamer.net",
+	"s3.amazonaws.com", "amazonaws.com",
+	"storage.googleapis.com",
+	"fastly.net", "akamaihd.net", "edgecastcdn.net",
+}
+
 var importURLClient = &http.Client{
 	Timeout: importURLTimeout,
 	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -157,6 +236,23 @@ func isBlockedImportHost(hostname string) bool {
 	return false
 }
 
+func isAllowedImportHost(hostname string) bool {
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	if hostname == "" {
+		return false
+	}
+	for _, suf := range allowedImportHostSuffixes {
+		suf = strings.ToLower(strings.TrimSpace(suf))
+		if suf == "" {
+			continue
+		}
+		if hostname == suf || strings.HasSuffix(hostname, "."+suf) {
+			return true
+		}
+	}
+	return false
+}
+
 func isPrivateOrLocalIP(ip net.IP) bool {
 	if ip == nil {
 		return true
@@ -202,6 +298,9 @@ func validateImportURL(ctx context.Context, parsed *url.URL) error {
 	if isBlockedImportHost(hostname) {
 		return fmt.Errorf("blocked host")
 	}
+	if !isAllowedImportHost(hostname) {
+		return fmt.Errorf("host not allowed")
+	}
 
 	// Block direct IP literals.
 	if ip := net.ParseIP(hostname); ip != nil {
@@ -222,7 +321,7 @@ func validateImportURL(ctx context.Context, parsed *url.URL) error {
 	}
 
 	// Resolve DNS and block private/local ranges.
-	addrs, err := net.DefaultResolver.LookupIP(ctx, "ip", hostname)
+	addrs, err := importURLLookupIP(ctx, "ip", hostname)
 	if err != nil {
 		return fmt.Errorf("dns lookup failed")
 	}

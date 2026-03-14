@@ -896,6 +896,12 @@ func newChatMessagesHandler(chat ChatService, i18n Translator, defaultLocale str
 				}
 				limit = parsed
 			}
+			if limit <= 0 {
+				limit = 50
+			}
+			if limit > 500 {
+				limit = 500
+			}
 
 			page, err := chat.ListMessages(r.Context(), chatsvc.ListMessagesInput{
 				UserID:   userID,
