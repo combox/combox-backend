@@ -473,7 +473,7 @@ func (stubChatService) CreateChannel(context.Context, chatsvc.CreateChannelInput
 }
 
 func (stubChatService) CreatePublicChannel(context.Context, chatsvc.CreatePublicChannelInput) (chatsvc.Chat, error) {
-				return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) OpenDirectChat(_ context.Context, input chatsvc.OpenDirectChatInput) (chatsvc.Chat, error) {
@@ -504,7 +504,7 @@ func (stubChatService) UpdateChat(_ context.Context, input chatsvc.UpdateChatInp
 }
 
 func (stubChatService) GetChat(_ context.Context, _ string, chatID string) (chatsvc.Chat, error) {
-				return chatsvc.Chat{ID: chatID, Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
+	return chatsvc.Chat{ID: chatID, Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) ListChannels(context.Context, string, string) ([]chatsvc.Chat, error) {
@@ -540,7 +540,7 @@ func (stubChatService) RemoveMember(context.Context, string, string, string) ([]
 }
 
 func (stubChatService) SubscribePublicChannel(context.Context, string, string) (chatsvc.Chat, error) {
-				return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) UnsubscribePublicChannel(context.Context, string, string) error {
@@ -576,7 +576,7 @@ func (stubChatService) CreateInviteLink(context.Context, chatsvc.CreateInviteLin
 }
 
 func (stubChatService) AcceptInviteLink(context.Context, string, string) (chatsvc.Chat, error) {
-				return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) LeaveChat(context.Context, string, string) error {

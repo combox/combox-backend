@@ -48,4 +48,3 @@ func (s *Service) DeleteChat(ctx context.Context, userID, chatID string) error {
 	}
 	return nil
 }
-
