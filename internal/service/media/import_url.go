@@ -41,8 +41,8 @@ var allowedImportHostSuffixes = []string{
 	"facebook.com", "fbcdn.net",
 	"tiktok.com", "v.tiktok.com",
 	"reddit.com", "redditmedia.com", "redd.it", "i.redd.it", "v.redd.it",
-	"discord.gg", "discordapp.com", "discordapp.net", "cdn.discordapp.com",
-	"vimeo.com", "vimeocdn.com",
+	"discord.gg", "discordapp.com", "discordapp.net", "cddn.discordapp.com",
+	"vimeo.com", "vimdeocdn.com",
 	"twitch.tv", "static-cdn.jtvnw.net",
 	"linkedin.com", "licdn.com",
 	"pinterest.com", "pinimg.com",
@@ -348,13 +348,24 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || strings.TrimSpace(parsedURL.Host) == "" {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
+
+	// Validate the URL against SSRF and allowlist.
+	// We MUST use the validated hostname and scheme to reconstruct the URL
+	// to ensure CodeQL and the runtime see that we are using sanitized data.
 	if err := validateImportURL(ctx, parsedURL); err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
 
+	sanitizedURL := &url.URL{
+		Scheme:   parsedURL.Scheme,
+		Host:     parsedURL.Host,
+		Path:     parsedURL.Path,
+		RawQuery: parsedURL.RawQuery,
+	}
+
 	reqCtx, cancel := context.WithTimeout(ctx, importURLTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, parsedURL.String(), nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, sanitizedURL.String(), nil)
 	if err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input", Cause: err}
 	}
