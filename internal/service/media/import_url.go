@@ -354,11 +354,15 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
 
-	// Use the validated parsedURL directly for the request.
-	// The URL was already validated by validateImportURL above.
+	// Reconstruct URL from validated components only (exclude query string to prevent injection).
+	validatedURL := url.URL{
+		Scheme: parsedURL.Scheme,
+		Host:   parsedURL.Host,
+		Path:   parsedURL.Path,
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, importURLTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, parsedURL.String(), nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, validatedURL.String(), nil)
 	if err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input", Cause: err}
 	}
