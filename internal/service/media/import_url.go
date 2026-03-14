@@ -22,18 +22,57 @@ const (
 	maxImportURLBytes = int64(64 * 1024 * 1024)
 )
 
-var importURLLookupIP = func(ctx context.Context, network, host string) ([]net.IP, error) {
-	return net.DefaultResolver.LookupIP(ctx, network, host)
+// importURLClient is configured with a custom DialContext to prevent SSRF and DNS Rebinding.
+// It resolves the IP once, validates it, and connects directly to that IP.
+var importURLClient = &http.Client{
+	Timeout: importURLTimeout,
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		// Stop redirects to prevent bypassing host validation via 3xx responses.
+		return http.ErrUseLastResponse
+	},
+	Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+
+			// Perform DNS lookup manually to validate the resulting IP before connection.
+			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+			if err != nil {
+				return nil, err
+			}
+
+			var safeIP net.IP
+			for _, ip := range ips {
+				// Block private, loopback, and local IP ranges.
+				if isPrivateOrLocalIP(ip) {
+					return nil, fmt.Errorf("SSRF prevention: blocked connection to private IP %s", ip.String())
+				}
+				if safeIP == nil {
+					safeIP = ip
+				}
+			}
+
+			if safeIP == nil {
+				return nil, fmt.Errorf("no valid public IP addresses found for host %s", host)
+			}
+
+			// Connect to the specific validated IP to prevent DNS Rebinding between check and use.
+			dialer := &net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(safeIP.String(), port))
+		},
+	},
 }
 
 var allowedImportHostSuffixes = []string{
-	// GIFs & Media
 	"giphy.com", "media.giphy.com", "giphy.me",
 	"tenor.com", "media.tenor.com", "media1.tenor.com",
 	"imgur.com", "i.imgur.com",
 	"gfycat.com", "thumbs.gfycat.com",
-
-	// Social Media & Video
 	"youtube.com", "youtu.be", "m.youtube.com", "www.youtube.com",
 	"github.com", "githubusercontent.com", "githubassets.com", "raw.githubusercontent.com",
 	"twitter.com", "x.com", "twimg.com", "pbs.twimg.com",
@@ -46,8 +85,6 @@ var allowedImportHostSuffixes = []string{
 	"twitch.tv", "static-cdn.jtvnw.net",
 	"linkedin.com", "licdn.com",
 	"pinterest.com", "pinimg.com",
-
-	// News & Articles (Major International)
 	"reuters.com", "apnews.com", "bloomberg.com",
 	"nytimes.com", "wsj.com", "wsj.net",
 	"bbc.com", "bbc.co.uk", "bbci.co.uk",
@@ -61,28 +98,18 @@ var allowedImportHostSuffixes = []string{
 	"nature.com",
 	"science.org",
 	"nationalgeographic.com",
-
-	// Music & Audio
 	"spotify.com", "scdn.co", "soundcloud.com", "sndcdn.com",
 	"music.apple.com", "itunes.apple.com", "deezer.com", "dzcdn.net",
 	"tidal.com", "bandcamp.com",
-
-	// Movies & Streaming
 	"netflix.com", "nflxso.net", "disneyplus.com", "disney.com",
 	"hbo.com", "hbomax.com", "max.com", "primevideo.com",
-	"apple.com/apple-tv-plus", "hulu.com", "imdb.com",
-
-	// European News
+	"hulu.com", "imdb.com",
 	"lemonde.fr", "lefigaro.fr", "spiegel.de", "zeit.de", "dw.com",
 	"elpais.com", "elmundo.es", "corriere.it", "repubblica.it",
 	"euronews.com", "politico.eu", "france24.com",
-
-	// Ukrainian News & Portals
 	"pravda.com.ua", "unian.net", "ukrinform.ua", "tsn.ua", "nv.ua",
 	"censor.net", "rbc.ua", "gordonua.com", "korrespondent.net",
 	"interfax.com.ua", "suspilne.media", "babel.ua",
-
-	// Russian-segment & Blogs
 	"telegra.ph", "pikabu.ru", "meduza.io", "meduza.care",
 	"tjournal.ru", "vc.ru", "habr.com", "dtf.ru",
 	"rbc.ru", "kommersant.ru", "lenta.ru", "gazeta.ru",
@@ -90,8 +117,6 @@ var allowedImportHostSuffixes = []string{
 	"snob.ru", "echo.msk.ru", "tvrain.ru", "novayagazeta.ru",
 	"dzen.ru", "yandex.ru", "yastatic.net",
 	"vk.com", "vk.me", "vk-cdn.net", "ok.ru",
-
-	// Tech News & Gaming
 	"techcrunch.com", "theverge.com", "wired.com",
 	"arstechnica.com", "engadget.com", "gizmodo.com",
 	"medium.com", "substack.com", "dev.to",
@@ -101,19 +126,13 @@ var allowedImportHostSuffixes = []string{
 	"fastly.net", "akamaihd.net", "edgecastcdn.net",
 }
 
-var importURLClient = &http.Client{
-	Timeout: importURLTimeout,
-	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
-}
-
 type ImportFromURLInput struct {
 	UserID    string
 	SourceURL string
 	Filename  string
 }
 
+// normalizeImportSourceURL extracts direct media links from known platforms like Giphy.
 func normalizeImportSourceURL(raw string) string {
 	source := strings.TrimSpace(raw)
 	if source == "" {
@@ -148,15 +167,9 @@ func inferImportedKind(mimeType string) string {
 	case strings.HasPrefix(mimeType, "image/"):
 		return "image"
 	case strings.HasPrefix(mimeType, "video/"):
-		if _, ok := allowedStreamMIMEs[mimeType]; ok {
-			return "video"
-		}
-		return "file"
+		return "video"
 	case strings.HasPrefix(mimeType, "audio/") || mimeType == "application/ogg":
-		if _, ok := allowedStreamMIMEs[mimeType]; ok {
-			return "audio"
-		}
-		return "file"
+		return "audio"
 	default:
 		return "file"
 	}
@@ -200,11 +213,7 @@ func sanitizeFilename(name string) string {
 	out := make([]rune, 0, len(name))
 	for _, r := range name {
 		switch {
-		case r >= 'a' && r <= 'z':
-			out = append(out, r)
-		case r >= 'A' && r <= 'Z':
-			out = append(out, r)
-		case r >= '0' && r <= '9':
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
 			out = append(out, r)
 		case r == '.', r == '-', r == '_':
 			out = append(out, r)
@@ -213,27 +222,7 @@ func sanitizeFilename(name string) string {
 		}
 	}
 	safe := strings.Trim(strings.TrimSpace(string(out)), "._")
-	if safe == "" {
-		return ""
-	}
 	return safe
-}
-
-func isBlockedImportHost(hostname string) bool {
-	hostname = strings.ToLower(strings.TrimSpace(hostname))
-	if hostname == "" {
-		return true
-	}
-	if hostname == "localhost" {
-		return true
-	}
-	if strings.HasSuffix(hostname, ".local") {
-		return true
-	}
-	if strings.HasSuffix(hostname, ".internal") {
-		return true
-	}
-	return false
 }
 
 func isAllowedImportHost(hostname string) bool {
@@ -242,10 +231,6 @@ func isAllowedImportHost(hostname string) bool {
 		return false
 	}
 	for _, suf := range allowedImportHostSuffixes {
-		suf = strings.ToLower(strings.TrimSpace(suf))
-		if suf == "" {
-			continue
-		}
 		if hostname == suf || strings.HasSuffix(hostname, "."+suf) {
 			return true
 		}
@@ -257,82 +242,47 @@ func isPrivateOrLocalIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
 		return true
 	}
-	if ip.IsPrivate() {
-		return true
-	}
-	// IPv4: 0.0.0.0/8 and 100.64.0.0/10
 	if v4 := ip.To4(); v4 != nil {
-		a := v4[0]
-		b := v4[1]
-		if a == 0 {
-			return true
-		}
-		if a == 100 && b >= 64 && b <= 127 {
+		a, b := v4[0], v4[1]
+		if a == 0 || (a == 100 && b >= 64 && b <= 127) {
 			return true
 		}
 	}
 	return false
 }
 
-func validateImportURL(ctx context.Context, parsed *url.URL) error {
+// validateImportURL checks URL structure and allowlist before making any network calls.
+func validateImportURL(parsed *url.URL) error {
 	if parsed == nil {
 		return fmt.Errorf("invalid url")
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("invalid scheme")
-	}
-	if strings.TrimSpace(parsed.Host) == "" {
-		return fmt.Errorf("invalid host")
-	}
-	if parsed.User != nil {
-		return fmt.Errorf("userinfo not allowed")
-	}
-	if strings.TrimSpace(parsed.Fragment) != "" {
-		return fmt.Errorf("fragment not allowed")
+		return fmt.Errorf("unsupported scheme")
 	}
 
-	hostname := strings.TrimSpace(parsed.Hostname())
-	if isBlockedImportHost(hostname) {
-		return fmt.Errorf("blocked host")
+	hostname := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if hostname == "" || hostname == "localhost" || strings.HasSuffix(hostname, ".local") {
+		return fmt.Errorf("prohibited host")
 	}
+
 	if !isAllowedImportHost(hostname) {
-		return fmt.Errorf("host not allowed")
+		return fmt.Errorf("host not in allowlist")
 	}
 
-	// Block direct IP literals.
-	if ip := net.ParseIP(hostname); ip != nil {
-		if isPrivateOrLocalIP(ip) {
-			return fmt.Errorf("blocked ip")
-		}
+	if parsed.User != nil {
+		return fmt.Errorf("authentication in URL is not allowed")
 	}
 
-	// Block dangerous ports (allow 80/443 only).
-	if port := strings.TrimSpace(parsed.Port()); port != "" {
+	if port := parsed.Port(); port != "" {
 		p, err := strconv.Atoi(port)
-		if err != nil {
-			return fmt.Errorf("invalid port")
-		}
-		if p != 80 && p != 443 {
-			return fmt.Errorf("blocked port")
+		if err != nil || (p != 80 && p != 443) {
+			return fmt.Errorf("prohibited port")
 		}
 	}
 
-	// Resolve DNS and block private/local ranges.
-	addrs, err := importURLLookupIP(ctx, "ip", hostname)
-	if err != nil {
-		return fmt.Errorf("dns lookup failed")
-	}
-	if len(addrs) == 0 {
-		return fmt.Errorf("no dns results")
-	}
-	for _, ip := range addrs {
-		if isPrivateOrLocalIP(ip) {
-			return fmt.Errorf("blocked ip")
-		}
-	}
 	return nil
 }
 
@@ -340,28 +290,32 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 	userID := strings.TrimSpace(input.UserID)
 	sourceURL := normalizeImportSourceURL(input.SourceURL)
 	filename := strings.TrimSpace(input.Filename)
+
 	if userID == "" || sourceURL == "" {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
 
 	parsedURL, err := url.Parse(sourceURL)
-	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || strings.TrimSpace(parsedURL.Host) == "" {
+	if err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
 
-	// Validate the URL against SSRF and allowlist.
-	if err := validateImportURL(ctx, parsedURL); err != nil {
+	// Step 1: Structural and Allowlist Validation
+	if err := validateImportURL(parsedURL); err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
 
-	// Reconstruct URL from validated components only (exclude query string to prevent injection).
+	// Step 2: Strip sensitive components (query, fragments) to prevent injection.
 	validatedURL := url.URL{
 		Scheme: parsedURL.Scheme,
 		Host:   parsedURL.Host,
 		Path:   parsedURL.Path,
 	}
+
 	reqCtx, cancel := context.WithTimeout(ctx, importURLTimeout)
 	defer cancel()
+
+	// Step 3: Create the request. Security logic is handled by importURLClient.Transport.
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, validatedURL.String(), nil)
 	if err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input", Cause: err}
@@ -373,10 +327,12 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
 
+	// Step 4: Stream response body to a temporary file while checking size and sniffing MIME type.
 	tmpPath, cleanup, err := tempPath(".import")
 	if err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
@@ -398,11 +354,7 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 			total += int64(n)
 			if total > maxImportURLBytes {
 				_ = tmp.Close()
-				return GetAttachmentOutput{}, &Error{
-					Code:       CodeInvalidArgument,
-					MessageKey: "error.media.invalid_input",
-					Details:    map[string]string{"size_bytes": "max_64_mb"},
-				}
+				return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 			}
 			if sniff.Len() < 512 {
 				remain := 512 - sniff.Len()
@@ -424,34 +376,27 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 			return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: readErr}
 		}
 	}
-	if closeErr := tmp.Close(); closeErr != nil {
-		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: closeErr}
-	}
+	_ = tmp.Close()
+
 	if total <= 0 {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
 
+	// Step 5: Detect MIME type and finalize filename.
 	mimeType := strings.ToLower(strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0]))
 	if mimeType == "" {
-		mimeType = strings.ToLower(strings.TrimSpace(http.DetectContentType(sniff.Bytes())))
-	}
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
+		mimeType = http.DetectContentType(sniff.Bytes())
 	}
 
 	if filename == "" {
-		filename = filenameFromURL(parsedURL, "")
+		filename = filenameFromURL(parsedURL, "imported_file")
 	}
 	filename = sanitizeFilename(filename)
-	if filename == "" {
-		filename = "imported_" + uuid.NewString()
-	}
 	if filepath.Ext(filename) == "" {
-		if ext := extensionFromMime(mimeType); ext != "" {
-			filename += ext
-		}
+		filename += extensionFromMime(mimeType)
 	}
 
+	// Step 6: Store file and record in database.
 	kind := inferImportedKind(mimeType)
 	id := uuid.NewString()
 	objectKey := fmt.Sprintf("u/%s/%s/%s", userID, id, filename)
@@ -461,30 +406,31 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
 	}
 	defer file.Close()
+
 	if err := s.store.PutObject(ctx, objectKey, mimeType, file, total); err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
 	}
 
-	size := total
+	attachmentSize := total
 	created, err := s.repo.CreateAttachment(ctx, Attachment{
-		ID:                 id,
-		UserID:             userID,
-		Filename:           filename,
-		MimeType:           mimeType,
-		Kind:               kind,
-		Variant:            "original",
-		IsClientCompressed: false,
-		SizeBytes:          &size,
-		Bucket:             s.store.Bucket(),
-		ObjectKey:          objectKey,
-		UploadType:         "server_import",
-		CreatedAt:          time.Now().UTC(),
-		UpdatedAt:          time.Now().UTC(),
+		ID:         id,
+		UserID:     userID,
+		Filename:   filename,
+		MimeType:   mimeType,
+		Kind:       kind,
+		Variant:    "original",
+		SizeBytes:  &attachmentSize,
+		Bucket:     s.store.Bucket(),
+		ObjectKey:  objectKey,
+		UploadType: "server_import",
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
 	})
 	if err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
 	}
 
 	go s.processPreviewAsync(context.Background(), created)
+
 	return s.GetAttachment(ctx, userID, created.ID)
 }
