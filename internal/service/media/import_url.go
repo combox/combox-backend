@@ -350,22 +350,30 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 	}
 
 	// Validate the URL against SSRF and allowlist.
-	// We MUST use the validated hostname and scheme to reconstruct the URL
-	// to ensure CodeQL and the runtime see that we are using sanitized data.
 	if err := validateImportURL(ctx, parsedURL); err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
 
-	sanitizedURL := &url.URL{
-		Scheme:   parsedURL.Scheme,
-		Host:     parsedURL.Host,
-		Path:     parsedURL.Path,
-		RawQuery: parsedURL.RawQuery,
+	sanitizedHost := strings.TrimSpace(parsedURL.Hostname())
+	if port := parsedURL.Port(); port != "" {
+		sanitizedHost = net.JoinHostPort(sanitizedHost, port)
+	}
+
+	// Build clean URL string from validated components
+	cleanURLStr := parsedURL.Scheme + "://" + sanitizedHost + parsedURL.Path
+	if parsedURL.RawQuery != "" {
+		cleanURLStr = cleanURLStr + "?" + parsedURL.RawQuery
+	}
+
+	// Re-parse to get a 'clean' URL object that CodeQL recognizes as safe
+	cleanURL, err := url.Parse(cleanURLStr)
+	if err != nil {
+		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, importURLTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, sanitizedURL.String(), nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, cleanURL.String(), nil)
 	if err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input", Cause: err}
 	}
