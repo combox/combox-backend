@@ -38,11 +38,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
-        with:
-          languages: go
-
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -51,6 +46,11 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: go
 
       - name: Analyze
         uses: github/codeql-action/analyze@v4
