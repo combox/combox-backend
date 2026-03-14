@@ -473,7 +473,7 @@ func (stubChatService) CreateChannel(context.Context, chatsvc.CreateChannelInput
 }
 
 func (stubChatService) CreatePublicChannel(context.Context, chatsvc.CreatePublicChannelInput) (chatsvc.Chat, error) {
-	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) OpenDirectChat(_ context.Context, input chatsvc.OpenDirectChatInput) (chatsvc.Chat, error) {
@@ -491,6 +491,10 @@ func (stubChatService) DeleteChannel(context.Context, chatsvc.DeleteChannelInput
 	return nil
 }
 
+func (stubChatService) DeleteChat(context.Context, string, string) error {
+	return nil
+}
+
 func (stubChatService) UpdateChat(_ context.Context, input chatsvc.UpdateChatInput) (chatsvc.Chat, error) {
 	title := "General"
 	if input.Title.Set && input.Title.Value != nil {
@@ -500,7 +504,7 @@ func (stubChatService) UpdateChat(_ context.Context, input chatsvc.UpdateChatInp
 }
 
 func (stubChatService) GetChat(_ context.Context, _ string, chatID string) (chatsvc.Chat, error) {
-	return chatsvc.Chat{ID: chatID, Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
+	return chatsvc.Chat{ID: chatID, Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) ListChannels(context.Context, string, string) ([]chatsvc.Chat, error) {
@@ -536,7 +540,7 @@ func (stubChatService) RemoveMember(context.Context, string, string, string) ([]
 }
 
 func (stubChatService) SubscribePublicChannel(context.Context, string, string) (chatsvc.Chat, error) {
-	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) UnsubscribePublicChannel(context.Context, string, string) error {
@@ -555,7 +559,7 @@ func (stubChatService) ListInviteLinks(context.Context, string, string) ([]chats
 		Token:     "tok-1",
 		IsPrimary: true,
 		UseCount:  0,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}}, nil
 }
 
@@ -567,12 +571,12 @@ func (stubChatService) CreateInviteLink(context.Context, chatsvc.CreateInviteLin
 		Token:     "tok-1",
 		IsPrimary: false,
 		UseCount:  0,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}, nil
 }
 
 func (stubChatService) AcceptInviteLink(context.Context, string, string) (chatsvc.Chat, error) {
-	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "public_channel", IsPublic: true}, nil
+	return chatsvc.Chat{ID: "public-channel-1", Title: "News", Type: "standard", Kind: "standalone_channel", IsPublic: true}, nil
 }
 
 func (stubChatService) LeaveChat(context.Context, string, string) error {
@@ -621,6 +625,34 @@ func (stubChatService) MarkMessageReadByID(context.Context, string, string) (cha
 
 func (stubChatService) ToggleMessageReactionByID(context.Context, string, string, string) ([]chatsvc.MessageReaction, string, error) {
 	return nil, "set", nil
+}
+
+func (stubChatService) GetOrCreateCommentThread(context.Context, string, string, string) (string, error) {
+	return "thread-1", nil
+}
+
+func (stubChatService) BanPublicChannelUser(context.Context, string, string, string) error {
+	return nil
+}
+
+func (stubChatService) UnbanPublicChannelUser(context.Context, string, string, string) error {
+	return nil
+}
+
+func (stubChatService) MutePublicChannelUser(context.Context, string, string, string) error {
+	return nil
+}
+
+func (stubChatService) UnmutePublicChannelUser(context.Context, string, string, string) error {
+	return nil
+}
+
+func (stubChatService) ListPublicChannelBans(context.Context, string, string, int) ([]chatsvc.PublicChannelModerationEntry, error) {
+	return nil, nil
+}
+
+func (stubChatService) ListPublicChannelMutes(context.Context, string, string, int) ([]chatsvc.PublicChannelModerationEntry, error) {
+	return nil, nil
 }
 
 type stubAuthService struct {

@@ -138,7 +138,7 @@ func (r *SearchRepository) SearchPublicChats(ctx context.Context, q string, limi
 			       avatar_gradient
 			FROM chats
 			WHERE is_public = TRUE
-			  AND chat_kind IN ('group', 'channel', 'public_channel')
+AND chat_kind IN ('group', 'channel', 'standalone_channel')
 			  AND LOWER(COALESCE(public_slug, '')) LIKE $1
 			ORDER BY created_at DESC
 			LIMIT $2
@@ -180,7 +180,7 @@ func (r *SearchRepository) SearchPublicChats(ctx context.Context, q string, limi
 		       avatar_gradient
 		FROM chats
 		WHERE is_public = TRUE
-		  AND chat_kind IN ('group', 'channel', 'public_channel')
+AND chat_kind IN ('group', 'channel', 'standalone_channel')
 		  AND (
 		       LOWER(title) LIKE $1
 		       OR LOWER(COALESCE(public_slug, '')) LIKE $1

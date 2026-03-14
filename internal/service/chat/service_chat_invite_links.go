@@ -89,7 +89,7 @@ func (s *Service) AcceptInviteLink(ctx context.Context, userID, token string) (C
 	if target.IsDirect {
 		return Chat{}, invalidArg("error.chat.invalid_input")
 	}
-	if strings.TrimSpace(strings.ToLower(target.Kind)) == "public_channel" && target.IsPublic {
+	if isStandaloneChannel(target) && target.IsPublic {
 		role, roleErr := s.chats.GetChatMemberRole(ctx, target.ID, userID)
 		switch {
 		case roleErr == nil:
@@ -127,7 +127,7 @@ func (s *Service) AcceptInviteLink(ctx context.Context, userID, token string) (C
 		if err := s.chats.AddChatMembers(ctx, target.ID, []string{userID}); err != nil {
 			return Chat{}, internal(err)
 		}
-		if strings.TrimSpace(strings.ToLower(target.Kind)) == "public_channel" {
+		if isStandaloneChannel(target) {
 			if err := s.chats.UpdateChatMemberRole(ctx, target.ID, userID, "subscriber"); err != nil {
 				return Chat{}, internal(err)
 			}

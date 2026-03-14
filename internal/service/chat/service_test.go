@@ -13,6 +13,8 @@ type memChatRepo struct {
 	members     map[string]map[string]bool
 	roles       map[string]map[string]string
 	inviteLinks []ChatInviteLink
+	publicBans  map[string]map[string]PublicChannelModerationEntry
+	publicMutes map[string]map[string]PublicChannelModerationEntry
 	failList    bool
 }
 
@@ -89,6 +91,32 @@ func (m *memChatRepo) DeleteChannel(_ context.Context, parentChatID, channelChat
 	return nil
 }
 
+func (m *memChatRepo) DeleteChat(_ context.Context, chatID string) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return ErrChatNotFound
+	}
+	idx := -1
+	for i := range m.chats {
+		if m.chats[i].ID == chatID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return ErrChatNotFound
+	}
+	copy(m.chats[idx:], m.chats[idx+1:])
+	m.chats = m.chats[:len(m.chats)-1]
+	if m.members != nil {
+		delete(m.members, chatID)
+	}
+	if m.roles != nil {
+		delete(m.roles, chatID)
+	}
+	return nil
+}
+
 func (m *memChatRepo) CreateChannel(_ context.Context, parentChatID, title, channelType, _ string) (Chat, error) {
 	if _, ok := m.members[parentChatID]; !ok {
 		return Chat{}, ErrChatNotFound
@@ -132,7 +160,7 @@ func (m *memChatRepo) CreatePublicChannel(_ context.Context, title, publicSlug, 
 		Title:           title,
 		IsDirect:        false,
 		Type:            ChatTypeStandard,
-		Kind:            "public_channel",
+		Kind:            "standalone_channel",
 		IsPublic:        isPublic,
 		CommentsEnabled: true,
 		CreatedAt:       time.Now().UTC(),
@@ -246,7 +274,7 @@ func (m *memChatRepo) CreateChatInviteLink(_ context.Context, chatID, createdBy,
 		Title:     titlePtr,
 		IsPrimary: isPrimary,
 		UseCount:  0,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if isPrimary {
 		for i := range m.inviteLinks {
@@ -257,6 +285,132 @@ func (m *memChatRepo) CreateChatInviteLink(_ context.Context, chatID, createdBy,
 	}
 	m.inviteLinks = append(m.inviteLinks, item)
 	return item, nil
+}
+
+func (m *memChatRepo) GetOrCreateCommentThread(_ context.Context, channelChatID, rootMessageID, creatorUserID string) (string, error) {
+	channelChatID = strings.TrimSpace(channelChatID)
+	rootMessageID = strings.TrimSpace(rootMessageID)
+	creatorUserID = strings.TrimSpace(creatorUserID)
+	if channelChatID == "" || rootMessageID == "" || creatorUserID == "" {
+		return "", ErrChatNotFound
+	}
+	return "thread-1", nil
+}
+
+func (m *memChatRepo) IsPublicChannelBanned(_ context.Context, channelChatID, userID string) (bool, error) {
+	channelChatID = strings.TrimSpace(channelChatID)
+	userID = strings.TrimSpace(userID)
+	if m.publicBans == nil {
+		return false, nil
+	}
+	if m.publicBans[channelChatID] == nil {
+		return false, nil
+	}
+	_, ok := m.publicBans[channelChatID][userID]
+	return ok, nil
+}
+
+func (m *memChatRepo) IsPublicChannelMuted(_ context.Context, channelChatID, userID string) (bool, error) {
+	channelChatID = strings.TrimSpace(channelChatID)
+	userID = strings.TrimSpace(userID)
+	if m.publicMutes == nil {
+		return false, nil
+	}
+	if m.publicMutes[channelChatID] == nil {
+		return false, nil
+	}
+	_, ok := m.publicMutes[channelChatID][userID]
+	return ok, nil
+}
+
+func (m *memChatRepo) UpsertPublicChannelBan(_ context.Context, channelChatID, userID, actorUserID string) error {
+	channelChatID = strings.TrimSpace(channelChatID)
+	userID = strings.TrimSpace(userID)
+	actorUserID = strings.TrimSpace(actorUserID)
+	if channelChatID == "" || userID == "" || actorUserID == "" {
+		return ErrChatNotFound
+	}
+	if m.publicBans == nil {
+		m.publicBans = map[string]map[string]PublicChannelModerationEntry{}
+	}
+	if m.publicBans[channelChatID] == nil {
+		m.publicBans[channelChatID] = map[string]PublicChannelModerationEntry{}
+	}
+	m.publicBans[channelChatID][userID] = PublicChannelModerationEntry{UserID: userID, CreatedBy: actorUserID, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	return nil
+}
+
+func (m *memChatRepo) DeletePublicChannelBan(_ context.Context, channelChatID, userID string) error {
+	channelChatID = strings.TrimSpace(channelChatID)
+	userID = strings.TrimSpace(userID)
+	if m.publicBans == nil || m.publicBans[channelChatID] == nil {
+		return nil
+	}
+	delete(m.publicBans[channelChatID], userID)
+	return nil
+}
+
+func (m *memChatRepo) UpsertPublicChannelMute(_ context.Context, channelChatID, userID, actorUserID string) error {
+	channelChatID = strings.TrimSpace(channelChatID)
+	userID = strings.TrimSpace(userID)
+	actorUserID = strings.TrimSpace(actorUserID)
+	if channelChatID == "" || userID == "" || actorUserID == "" {
+		return ErrChatNotFound
+	}
+	if m.publicMutes == nil {
+		m.publicMutes = map[string]map[string]PublicChannelModerationEntry{}
+	}
+	if m.publicMutes[channelChatID] == nil {
+		m.publicMutes[channelChatID] = map[string]PublicChannelModerationEntry{}
+	}
+	m.publicMutes[channelChatID][userID] = PublicChannelModerationEntry{UserID: userID, CreatedBy: actorUserID, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	return nil
+}
+
+func (m *memChatRepo) DeletePublicChannelMute(_ context.Context, channelChatID, userID string) error {
+	channelChatID = strings.TrimSpace(channelChatID)
+	userID = strings.TrimSpace(userID)
+	if m.publicMutes == nil || m.publicMutes[channelChatID] == nil {
+		return nil
+	}
+	delete(m.publicMutes[channelChatID], userID)
+	return nil
+}
+
+func (m *memChatRepo) ListPublicChannelBans(_ context.Context, channelChatID string, limit int) ([]PublicChannelModerationEntry, error) {
+	channelChatID = strings.TrimSpace(channelChatID)
+	if limit <= 0 {
+		limit = 100
+	}
+	out := make([]PublicChannelModerationEntry, 0)
+	if m.publicBans == nil || m.publicBans[channelChatID] == nil {
+		return out, nil
+	}
+	for _, item := range m.publicBans[channelChatID] {
+		out = append(out, item)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (m *memChatRepo) ListPublicChannelMutes(_ context.Context, channelChatID string, limit int) ([]PublicChannelModerationEntry, error) {
+	channelChatID = strings.TrimSpace(channelChatID)
+	if limit <= 0 {
+		limit = 100
+	}
+	out := make([]PublicChannelModerationEntry, 0)
+	if m.publicMutes == nil || m.publicMutes[channelChatID] == nil {
+		return out, nil
+	}
+	for _, item := range m.publicMutes[channelChatID] {
+		out = append(out, item)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (m *memChatRepo) GetChatInviteLinkByToken(_ context.Context, token string) (ChatInviteLink, error) {

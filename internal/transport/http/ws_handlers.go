@@ -302,7 +302,7 @@ func handleRequest(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mute
 			reply(map[string]any{"error": err.Error()})
 			return
 		}
-		reply(map[string]any{"items": page.Items, "next_cursor": page.NextCursor})
+		reply(map[string]any{"items": page.Items, "statuses": page.Statuses, "next_cursor": page.NextCursor})
 	case "request.mark_read":
 		if deps.ChatService == nil {
 			reply(map[string]any{"error": "service_unavailable"})

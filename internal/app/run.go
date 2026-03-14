@@ -355,6 +355,7 @@ func Run(ctx context.Context) error {
 	chatSvc.SetAvatarStore(minioClient, 0)
 	chatSvc.SetNotificationRepository(profileRepo)
 	chatSvc.SetInviteRepository(chatInviteStoreAdapter{r: chatInviteRepo}, 0)
+	chatSvc.SetPublicAppBaseURL(os.Getenv("PUBLIC_APP_BASE_URL"))
 
 	e2eService, err := e2esvc.New(pgrepo.NewE2ERepository(postgresClient))
 	if err != nil {

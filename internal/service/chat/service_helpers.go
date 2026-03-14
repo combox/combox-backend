@@ -62,12 +62,61 @@ func normalizeStatus(raw string) (string, bool) {
 	}
 }
 
+func isStandaloneChannel(chatMeta Chat) bool {
+	kind := strings.TrimSpace(strings.ToLower(chatMeta.Kind))
+	if kind == "standalone_channel" {
+		return true
+	}
+	if kind != "channel" {
+		return false
+	}
+	if chatMeta.ParentChatID == nil {
+		return true
+	}
+	return strings.TrimSpace(*chatMeta.ParentChatID) == ""
+}
+
+func isGroupChannel(chatMeta Chat) bool {
+	kind := strings.TrimSpace(strings.ToLower(chatMeta.Kind))
+	if kind != "channel" {
+		return false
+	}
+	if chatMeta.ParentChatID == nil {
+		return false
+	}
+	return strings.TrimSpace(*chatMeta.ParentChatID) != ""
+}
+
+func canHaveCommentThread(chatMeta Chat) bool {
+	kind := strings.TrimSpace(strings.ToLower(chatMeta.Kind))
+	switch kind {
+	case "standalone_channel", "channel":
+		return !chatMeta.IsDirect
+	default:
+		return false
+	}
+}
+
 func (s *Service) ensureChatMember(ctx context.Context, chatID, userID string) error {
 	member, err := s.chats.IsChatMember(ctx, chatID, userID)
 	if err != nil {
 		return internal(err)
 	}
 	if !member {
+		chatMeta, metaErr := s.chats.GetChat(ctx, chatID)
+		if metaErr != nil {
+			return mapChatOrMessageRepoError(metaErr)
+		}
+		if isGroupChannel(chatMeta) {
+			parentID := strings.TrimSpace(*chatMeta.ParentChatID)
+			parentMember, parentErr := s.chats.IsChatMember(ctx, parentID, userID)
+			if parentErr != nil {
+				return internal(parentErr)
+			}
+			if parentMember {
+				return nil
+			}
+		}
 		return forbidden("error.chat.forbidden")
 	}
 	return nil

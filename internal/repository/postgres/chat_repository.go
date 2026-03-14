@@ -18,6 +18,215 @@ type ChatRepository struct {
 	client *Client
 }
 
+func (r *ChatRepository) IsPublicChannelBanned(ctx context.Context, channelChatID, userID string) (bool, error) {
+	const query = `
+		SELECT EXISTS(
+			SELECT 1
+			FROM public_channel_bans
+			WHERE channel_chat_id = $1::uuid
+			  AND user_id = $2::uuid
+		)
+	`
+	var exists bool
+	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(channelChatID), strings.TrimSpace(userID)).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+func (r *ChatRepository) IsPublicChannelMuted(ctx context.Context, channelChatID, userID string) (bool, error) {
+	const query = `
+		SELECT EXISTS(
+			SELECT 1
+			FROM public_channel_mutes
+			WHERE channel_chat_id = $1::uuid
+			  AND user_id = $2::uuid
+		)
+	`
+	var exists bool
+	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(channelChatID), strings.TrimSpace(userID)).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+func (r *ChatRepository) UpsertPublicChannelBan(ctx context.Context, channelChatID, userID, actorUserID string) error {
+	const query = `
+		INSERT INTO public_channel_bans (channel_chat_id, user_id, created_by)
+		VALUES ($1::uuid, $2::uuid, $3::uuid)
+		ON CONFLICT (channel_chat_id, user_id) DO UPDATE
+		SET created_by = EXCLUDED.created_by,
+		    created_at = NOW()
+	`
+	_, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(channelChatID), strings.TrimSpace(userID), strings.TrimSpace(actorUserID))
+	return err
+}
+
+func (r *ChatRepository) DeletePublicChannelBan(ctx context.Context, channelChatID, userID string) error {
+	const query = `
+		DELETE FROM public_channel_bans
+		WHERE channel_chat_id = $1::uuid
+		  AND user_id = $2::uuid
+	`
+	_, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(channelChatID), strings.TrimSpace(userID))
+	return err
+}
+
+func (r *ChatRepository) UpsertPublicChannelMute(ctx context.Context, channelChatID, userID, actorUserID string) error {
+	const query = `
+		INSERT INTO public_channel_mutes (channel_chat_id, user_id, created_by)
+		VALUES ($1::uuid, $2::uuid, $3::uuid)
+		ON CONFLICT (channel_chat_id, user_id) DO UPDATE
+		SET created_by = EXCLUDED.created_by,
+		    created_at = NOW()
+	`
+	_, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(channelChatID), strings.TrimSpace(userID), strings.TrimSpace(actorUserID))
+	return err
+}
+
+func (r *ChatRepository) DeletePublicChannelMute(ctx context.Context, channelChatID, userID string) error {
+	const query = `
+		DELETE FROM public_channel_mutes
+		WHERE channel_chat_id = $1::uuid
+		  AND user_id = $2::uuid
+	`
+	_, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(channelChatID), strings.TrimSpace(userID))
+	return err
+}
+
+func (r *ChatRepository) ListPublicChannelBans(ctx context.Context, channelChatID string, limit int) ([]chat.PublicChannelModerationEntry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	const query = `
+		SELECT user_id::text, created_by::text, created_at::timestamptz::text
+		FROM public_channel_bans
+		WHERE channel_chat_id = $1::uuid
+		ORDER BY created_at DESC
+		LIMIT $2::int
+	`
+	rows, err := r.client.pool.Query(ctx, query, strings.TrimSpace(channelChatID), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []chat.PublicChannelModerationEntry
+	for rows.Next() {
+		var item chat.PublicChannelModerationEntry
+		if err := rows.Scan(&item.UserID, &item.CreatedBy, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (r *ChatRepository) ListPublicChannelMutes(ctx context.Context, channelChatID string, limit int) ([]chat.PublicChannelModerationEntry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	const query = `
+		SELECT user_id::text, created_by::text, created_at::timestamptz::text
+		FROM public_channel_mutes
+		WHERE channel_chat_id = $1::uuid
+		ORDER BY created_at DESC
+		LIMIT $2::int
+	`
+	rows, err := r.client.pool.Query(ctx, query, strings.TrimSpace(channelChatID), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []chat.PublicChannelModerationEntry
+	for rows.Next() {
+		var item chat.PublicChannelModerationEntry
+		if err := rows.Scan(&item.UserID, &item.CreatedBy, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (r *ChatRepository) GetOrCreateCommentThread(ctx context.Context, channelChatID, rootMessageID, creatorUserID string) (string, error) {
+	channelChatID = strings.TrimSpace(channelChatID)
+	rootMessageID = strings.TrimSpace(rootMessageID)
+	creatorUserID = strings.TrimSpace(creatorUserID)
+	if channelChatID == "" || rootMessageID == "" || creatorUserID == "" {
+		return "", chat.ErrChatNotFound
+	}
+
+	const selectExisting = `
+		SELECT thread_chat_id::text
+		FROM comment_threads
+		WHERE channel_chat_id = $1::uuid
+		  AND root_message_id = $2::uuid
+		LIMIT 1
+	`
+	var existing string
+	if err := r.client.pool.QueryRow(ctx, selectExisting, channelChatID, rootMessageID).Scan(&existing); err == nil {
+		return strings.TrimSpace(existing), nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+
+	tx, err := r.client.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Create a hidden chat row for the thread.
+	const insertThreadChat = `
+		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind, parent_chat_id, comments_enabled)
+		SELECT '', FALSE, $2::uuid, COALESCE(NULLIF(parent.chat_type, ''), 'standard'), 'comment_thread', $1::uuid, TRUE
+		FROM chats parent
+		WHERE parent.id = $1::uuid
+		AND (
+		  parent.chat_kind IN ('standalone_channel', 'channel')
+		)
+		RETURNING id::text
+	`
+	var threadChatID string
+	if err := tx.QueryRow(ctx, insertThreadChat, channelChatID, creatorUserID).Scan(&threadChatID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", chat.ErrChatNotFound
+		}
+		return "", err
+	}
+
+	const insertThread = `
+		INSERT INTO comment_threads (channel_chat_id, root_message_id, thread_chat_id)
+		VALUES ($1::uuid, $2::uuid, $3::uuid)
+		ON CONFLICT (channel_chat_id, root_message_id) DO UPDATE
+		SET thread_chat_id = EXCLUDED.thread_chat_id
+		RETURNING thread_chat_id::text
+	`
+	var out string
+	if err := tx.QueryRow(ctx, insertThread, channelChatID, rootMessageID, strings.TrimSpace(threadChatID)).Scan(&out); err != nil {
+		return "", err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // topic allocation uses chats.next_topic_number on the group row.
 
 func (r *MessageRepository) GetMessageMeta(ctx context.Context, messageID string) (chat.MessageMeta, error) {
@@ -210,7 +419,7 @@ func (r *ChatRepository) CreatePublicChannel(ctx context.Context, title, publicS
 
 	const insertChat = `
 		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind, is_public, public_slug, comments_enabled)
-		VALUES ($1, FALSE, $2::uuid, 'standard', 'public_channel', $3, $4, TRUE)
+		VALUES ($1, FALSE, $2::uuid, 'standard', 'standalone_channel', $3, $4, TRUE)
 		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, parent_chat_id::text, channel_type, topic_number, bot_id::text, avatar_data_url, avatar_gradient, created_at
 	`
 
@@ -300,7 +509,7 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 		       peer.id::text,
 		       cm.role,
 		       CASE
-		         WHEN c.chat_kind = 'public_channel' THEN (
+		         WHEN c.chat_kind IN ('standalone_channel') THEN (
 		           SELECT COUNT(*)
 		           FROM chat_members cm_count
 		           WHERE cm_count.chat_id = c.id
@@ -341,7 +550,10 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 		) latest ON TRUE
 		WHERE cm.user_id = $1::uuid
 		  AND cm.role <> 'banned'
-		  AND (c.chat_kind <> 'channel' OR c.parent_chat_id IS NULL)
+		  -- Exclude group "topics" (chat_kind='channel' with a parent group) from the main chat list,
+		  -- but keep top-level/public channels.
+		  AND NOT (c.chat_kind = 'channel' AND c.parent_chat_id IS NOT NULL)
+		  AND c.chat_kind <> 'comment_thread'
 		  AND (c.is_direct = FALSE OR peer.id IS NOT NULL)
 		ORDER BY c.created_at DESC
 	`
@@ -401,6 +613,47 @@ func (r *ChatRepository) DeleteChannel(ctx context.Context, parentChatID, channe
 	}
 	if res.RowsAffected() == 0 {
 		return chat.ErrChatNotFound
+	}
+	return nil
+}
+
+func (r *ChatRepository) DeleteChat(ctx context.Context, chatID string) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return chat.ErrChatNotFound
+	}
+
+	tx, err := r.client.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// If this is a group, delete its child topics first (if any).
+	if _, err := tx.Exec(ctx, `DELETE FROM chats WHERE parent_chat_id = $1::uuid`, chatID); err != nil {
+		if strings.Contains(err.Error(), "violates foreign key constraint") {
+			return chat.ErrChatNotFound
+		}
+		return err
+	}
+
+	res, err := tx.Exec(ctx, `
+		DELETE FROM chats
+		WHERE id = $1::uuid
+		  AND chat_kind IN ('group', 'standalone_channel')
+	`, chatID)
+	if err != nil {
+		if strings.Contains(err.Error(), "violates foreign key constraint") {
+			return chat.ErrChatNotFound
+		}
+		return err
+	}
+	if res.RowsAffected() == 0 {
+		return chat.ErrChatNotFound
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1189,7 +1442,7 @@ func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, lim
 		  AND m.deleted_at IS NULL
 		  %s
 		ORDER BY m.created_at DESC, m.id DESC
-		LIMIT $2
+		LIMIT $2::int
 	`
 
 	args := []any{chatID, limit}
@@ -1302,7 +1555,7 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 		  AND (m.is_e2e = FALSE OR e.recipient_device_id IS NOT NULL)
 		  %s
 		ORDER BY m.created_at DESC, m.id DESC
-		LIMIT $3
+		LIMIT $3::int
 	`
 
 	args := []any{chatID, deviceID, limit}
