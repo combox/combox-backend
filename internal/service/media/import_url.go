@@ -354,26 +354,11 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
 
-	sanitizedHost := strings.TrimSpace(parsedURL.Hostname())
-	if port := parsedURL.Port(); port != "" {
-		sanitizedHost = net.JoinHostPort(sanitizedHost, port)
-	}
-
-	// Build clean URL string from validated components
-	cleanURLStr := parsedURL.Scheme + "://" + sanitizedHost + parsedURL.Path
-	if parsedURL.RawQuery != "" {
-		cleanURLStr = cleanURLStr + "?" + parsedURL.RawQuery
-	}
-
-	// Re-parse to get a 'clean' URL object that CodeQL recognizes as safe
-	cleanURL, err := url.Parse(cleanURLStr)
-	if err != nil {
-		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
-	}
-
+	// Use the validated parsedURL directly for the request.
+	// The URL was already validated by validateImportURL above.
 	reqCtx, cancel := context.WithTimeout(ctx, importURLTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, cleanURL.String(), nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, parsedURL.String(), nil)
 	if err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input", Cause: err}
 	}
