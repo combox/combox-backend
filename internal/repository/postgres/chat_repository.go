@@ -1401,6 +1401,12 @@ func (r *MessageRepository) CreateMessageE2EWithAttachments(ctx context.Context,
 }
 
 func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, limit int, cursor string) (chat.MessagePage, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
 	const baseQuery = `
 		SELECT m.id::text,
 		       m.chat_id::text,
@@ -1511,10 +1517,9 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 	if limit <= 0 {
 		limit = 50
 	}
-	if limit > 100 {
-		limit = 100
+	if limit > 500 {
+		limit = 500
 	}
-
 	const baseQuery = `
 		SELECT m.id::text, m.chat_id::text, COALESCE(m.user_id::text, ''), m.sender_bot_id::text, m.content,
 		       m.reply_to_message_id::text,

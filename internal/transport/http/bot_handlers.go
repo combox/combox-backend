@@ -123,6 +123,12 @@ func newPublicBotChatMessagesHandler(chat ChatService, i18n Translator, defaultL
 			}
 			limit = parsed
 		}
+		if limit <= 0 {
+			limit = 50
+		}
+		if limit > 500 {
+			limit = 500
+		}
 
 		page, err := chat.ListMessages(r.Context(), chatsvc.ListMessagesInput{
 			UserID: principal.UserID,

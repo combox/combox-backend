@@ -172,6 +172,12 @@ func newPublicChannelsHandler(chat ChatService, i18n Translator, defaultLocale s
 						limit = n
 					}
 				}
+				if limit <= 0 {
+					limit = 200
+				}
+				if limit > 500 {
+					limit = 500
+				}
 				items, err := chat.ListPublicChannelBans(r.Context(), userID, channelID, limit)
 				if err != nil {
 					writeChatServiceError(w, r, err, i18n, defaultLocale)
@@ -189,6 +195,12 @@ func newPublicChannelsHandler(chat ChatService, i18n Translator, defaultLocale s
 					if n, convErr := strconv.Atoi(raw); convErr == nil {
 						limit = n
 					}
+				}
+				if limit <= 0 {
+					limit = 200
+				}
+				if limit > 500 {
+					limit = 500
 				}
 				items, err := chat.ListPublicChannelMutes(r.Context(), userID, channelID, limit)
 				if err != nil {
@@ -259,6 +271,12 @@ func newPublicChannelByIDHandler(chat ChatService, i18n Translator, defaultLocal
 					if n, convErr := strconv.Atoi(raw); convErr == nil {
 						limit = n
 					}
+				}
+				if limit <= 0 {
+					limit = 60
+				}
+				if limit > 200 {
+					limit = 200
 				}
 				cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
 				page, err := chat.ListMessages(r.Context(), chatsvc.ListMessagesInput{UserID: userID, ChatID: threadChatID, Limit: limit, Cursor: cursor})
