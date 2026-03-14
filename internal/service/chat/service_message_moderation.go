@@ -31,7 +31,7 @@ func (s *Service) EditMessage(ctx context.Context, input EditMessageInput) (Mess
 		return Message{}, invalidArg("error.message.edit_not_allowed")
 	}
 	allowForeign := false
-	if strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "public_channel" {
+	if isStandaloneChannel(chatMeta) {
 		role, err := s.chats.GetChatMemberRole(ctx, chatID, userID)
 		if err != nil {
 			return Message{}, internal(err)
@@ -128,13 +128,35 @@ func (s *Service) DeleteMessageByID(ctx context.Context, userID, messageID strin
 		return internal(err)
 	}
 
-	if err := s.ensureChatMember(ctx, meta.ChatID, userID); err != nil {
-		return err
-	}
-
 	chatMeta, err := s.chats.GetChat(ctx, meta.ChatID)
 	if err != nil {
 		return mapChatOrMessageRepoError(err)
+	}
+	kind := strings.TrimSpace(strings.ToLower(chatMeta.Kind))
+	if kind == "comment_thread" {
+		parentID := ""
+		if chatMeta.ParentChatID != nil {
+			parentID = strings.TrimSpace(*chatMeta.ParentChatID)
+		}
+		if parentID == "" {
+			return forbidden("error.chat.forbidden")
+		}
+		if banned, banErr := s.chats.IsPublicChannelBanned(ctx, parentID, userID); banErr != nil {
+			return internal(banErr)
+		} else if banned {
+			return forbidden("error.chat.forbidden")
+		}
+		role, roleErr := s.chats.GetChatMemberRole(ctx, parentID, userID)
+		if roleErr != nil {
+			return internal(roleErr)
+		}
+		if !canPostPublicChannelByRole(role) {
+			return forbidden("error.chat.forbidden")
+		}
+	} else {
+		if err := s.ensureChatMember(ctx, meta.ChatID, userID); err != nil {
+			return err
+		}
 	}
 	chatType, ok := normalizeChatType(chatMeta.Type)
 	if !ok {
@@ -144,7 +166,7 @@ func (s *Service) DeleteMessageByID(ctx context.Context, userID, messageID strin
 		return invalidArg("error.message.edit_not_allowed")
 	}
 	allowForeign := false
-	if strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "public_channel" {
+	if isStandaloneChannel(chatMeta) {
 		role, err := s.chats.GetChatMemberRole(ctx, meta.ChatID, userID)
 		if err != nil {
 			return internal(err)
@@ -152,6 +174,9 @@ func (s *Service) DeleteMessageByID(ctx context.Context, userID, messageID strin
 		if !canPostPublicChannelByRole(role) {
 			return forbidden("error.chat.forbidden")
 		}
+		allowForeign = true
+	} else if kind == "comment_thread" {
+		// Admins can delete foreign messages in threads.
 		allowForeign = true
 	}
 
@@ -241,23 +266,55 @@ func (s *Service) ToggleMessageReactionByID(ctx context.Context, userID, message
 		return nil, "", internal(err)
 	}
 
-	if err := s.ensureChatMember(ctx, meta.ChatID, userID); err != nil {
-		return nil, "", err
-	}
 	chatMeta, chatErr := s.chats.GetChat(ctx, meta.ChatID)
 	if chatErr != nil {
 		return nil, "", mapChatOrMessageRepoError(chatErr)
 	}
-	if strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "public_channel" {
+	kind := strings.TrimSpace(strings.ToLower(chatMeta.Kind))
+	if isStandaloneChannel(chatMeta) {
+		if banned, banErr := s.chats.IsPublicChannelBanned(ctx, meta.ChatID, userID); banErr != nil {
+			return nil, "", internal(banErr)
+		} else if banned {
+			return nil, "", forbidden("error.chat.forbidden")
+		}
+		if muted, muteErr := s.chats.IsPublicChannelMuted(ctx, meta.ChatID, userID); muteErr != nil {
+			return nil, "", internal(muteErr)
+		} else if muted {
+			return nil, "", forbidden("error.chat.forbidden")
+		}
 		role, roleErr := s.chats.GetChatMemberRole(ctx, meta.ChatID, userID)
-		if roleErr != nil {
-			if errors.Is(roleErr, ErrChatNotFound) {
+		switch {
+		case roleErr == nil:
+			if !canReactPublicChannelByRole(role) {
 				return nil, "", forbidden("error.chat.forbidden")
 			}
+		case errors.Is(roleErr, ErrChatNotFound):
+			// Allow reactions for public viewers who are not subscribed.
+			// Bans/mutes are enforced above.
+		default:
 			return nil, "", internal(roleErr)
 		}
-		if !canReactPublicChannelByRole(role) {
+	} else if kind == "comment_thread" {
+		parentID := ""
+		if chatMeta.ParentChatID != nil {
+			parentID = strings.TrimSpace(*chatMeta.ParentChatID)
+		}
+		if parentID == "" {
 			return nil, "", forbidden("error.chat.forbidden")
+		}
+		if banned, banErr := s.chats.IsPublicChannelBanned(ctx, parentID, userID); banErr != nil {
+			return nil, "", internal(banErr)
+		} else if banned {
+			return nil, "", forbidden("error.chat.forbidden")
+		}
+		if muted, muteErr := s.chats.IsPublicChannelMuted(ctx, parentID, userID); muteErr != nil {
+			return nil, "", internal(muteErr)
+		} else if muted {
+			return nil, "", forbidden("error.chat.forbidden")
+		}
+	} else {
+		if err := s.ensureChatMember(ctx, meta.ChatID, userID); err != nil {
+			return nil, "", err
 		}
 	}
 

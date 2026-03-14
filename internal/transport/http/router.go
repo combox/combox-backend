@@ -94,8 +94,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 		mux.HandleFunc("/api/private/v1/chats/direct/messages", newDirectMessageHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/chats/", newChatMessagesHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/messages/", newMessagesByIDHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
-		mux.HandleFunc("/api/private/v1/public-channels", newPublicChannelsHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
-		mux.HandleFunc("/api/private/v1/public-channels/", newPublicChannelByIDHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/standalone-channels", newPublicChannelsHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/standalone-channels/", newPublicChannelByIDHandler(deps.Chat, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.Search != nil {
 		mux.HandleFunc("/api/private/v1/search", newSearchHandler(deps.Search, deps.I18n, deps.DefaultLocale))
@@ -245,6 +245,7 @@ type ChatService interface {
 	CreateChannel(ctx context.Context, input chat.CreateChannelInput) (chat.Chat, error)
 	CreatePublicChannel(ctx context.Context, input chat.CreatePublicChannelInput) (chat.Chat, error)
 	DeleteChannel(ctx context.Context, input chat.DeleteChannelInput) error
+	DeleteChat(ctx context.Context, userID, chatID string) error
 	SubscribePublicChannel(ctx context.Context, userID, chatID string) (chat.Chat, error)
 	UnsubscribePublicChannel(ctx context.Context, userID, chatID string) error
 	GetChat(ctx context.Context, userID, chatID string) (chat.Chat, error)
@@ -271,6 +272,13 @@ type ChatService interface {
 	DeleteMessageByID(ctx context.Context, userID, messageID string) error
 	MarkMessageReadByID(ctx context.Context, userID, messageID string) (chat.MessageStatus, error)
 	ToggleMessageReactionByID(ctx context.Context, userID, messageID, emoji string) ([]chat.MessageReaction, string, error)
+	GetOrCreateCommentThread(ctx context.Context, userID, channelChatID, rootMessageID string) (string, error)
+	BanPublicChannelUser(ctx context.Context, actorUserID, channelChatID, targetUserID string) error
+	UnbanPublicChannelUser(ctx context.Context, actorUserID, channelChatID, targetUserID string) error
+	MutePublicChannelUser(ctx context.Context, actorUserID, channelChatID, targetUserID string) error
+	UnmutePublicChannelUser(ctx context.Context, actorUserID, channelChatID, targetUserID string) error
+	ListPublicChannelBans(ctx context.Context, userID, channelChatID string, limit int) ([]chat.PublicChannelModerationEntry, error)
+	ListPublicChannelMutes(ctx context.Context, userID, channelChatID string, limit int) ([]chat.PublicChannelModerationEntry, error)
 }
 
 type E2EService interface {

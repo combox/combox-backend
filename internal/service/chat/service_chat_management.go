@@ -12,7 +12,6 @@ func (s *Service) CreateChat(ctx context.Context, input CreateChatInput) (Chat, 
 	if userID == "" || title == "" {
 		return Chat{}, invalidArg("error.chat.invalid_input")
 	}
-
 	chatType, ok := normalizeChatType(input.Type)
 	if !ok {
 		return Chat{}, invalidArg("error.chat.invalid_type")
@@ -37,6 +36,213 @@ func (s *Service) CreateChat(ctx context.Context, input CreateChatInput) (Chat, 
 		return Chat{}, internal(err)
 	}
 	return created, nil
+}
+
+func (s *Service) BanPublicChannelUser(ctx context.Context, actorUserID, channelChatID, targetUserID string) error {
+	actorUserID = strings.TrimSpace(actorUserID)
+	channelChatID = strings.TrimSpace(channelChatID)
+	targetUserID = strings.TrimSpace(targetUserID)
+	if actorUserID == "" || channelChatID == "" || targetUserID == "" {
+		return invalidArg("error.chat.invalid_input")
+	}
+	channel, err := s.chats.GetChat(ctx, channelChatID)
+	if err != nil {
+		return mapChatOrMessageRepoError(err)
+	}
+	if !isStandaloneChannel(channel) {
+		return invalidArg("error.chat.invalid_input")
+	}
+	role, err := s.chats.GetChatMemberRole(ctx, channelChatID, actorUserID)
+	if err != nil {
+		return mapChatOrMessageRepoError(err)
+	}
+	if !canPostPublicChannelByRole(role) {
+		return forbidden("error.chat.forbidden")
+	}
+	if err := s.chats.UpsertPublicChannelBan(ctx, channelChatID, targetUserID, actorUserID); err != nil {
+		return internal(err)
+	}
+	return nil
+}
+
+func (s *Service) UnbanPublicChannelUser(ctx context.Context, actorUserID, channelChatID, targetUserID string) error {
+	actorUserID = strings.TrimSpace(actorUserID)
+	channelChatID = strings.TrimSpace(channelChatID)
+	targetUserID = strings.TrimSpace(targetUserID)
+	if actorUserID == "" || channelChatID == "" || targetUserID == "" {
+		return invalidArg("error.chat.invalid_input")
+	}
+	channel, err := s.chats.GetChat(ctx, channelChatID)
+	if err != nil {
+		return mapChatOrMessageRepoError(err)
+	}
+	if !isStandaloneChannel(channel) {
+		return invalidArg("error.chat.invalid_input")
+	}
+	role, err := s.chats.GetChatMemberRole(ctx, channelChatID, actorUserID)
+	if err != nil {
+		return mapChatOrMessageRepoError(err)
+	}
+	if !canPostPublicChannelByRole(role) {
+		return forbidden("error.chat.forbidden")
+	}
+	if err := s.chats.DeletePublicChannelBan(ctx, channelChatID, targetUserID); err != nil {
+		return internal(err)
+	}
+	return nil
+}
+
+func (s *Service) MutePublicChannelUser(ctx context.Context, actorUserID, channelChatID, targetUserID string) error {
+	actorUserID = strings.TrimSpace(actorUserID)
+	channelChatID = strings.TrimSpace(channelChatID)
+	targetUserID = strings.TrimSpace(targetUserID)
+	if actorUserID == "" || channelChatID == "" || targetUserID == "" {
+		return invalidArg("error.chat.invalid_input")
+	}
+	channel, err := s.chats.GetChat(ctx, channelChatID)
+	if err != nil {
+		return mapChatOrMessageRepoError(err)
+	}
+	if !isStandaloneChannel(channel) {
+		return invalidArg("error.chat.invalid_input")
+	}
+	role, err := s.chats.GetChatMemberRole(ctx, channelChatID, actorUserID)
+	if err != nil {
+		return mapChatOrMessageRepoError(err)
+	}
+	if !canPostPublicChannelByRole(role) {
+		return forbidden("error.chat.forbidden")
+	}
+	if err := s.chats.UpsertPublicChannelMute(ctx, channelChatID, targetUserID, actorUserID); err != nil {
+		return internal(err)
+	}
+	return nil
+}
+
+func (s *Service) UnmutePublicChannelUser(ctx context.Context, actorUserID, channelChatID, targetUserID string) error {
+	actorUserID = strings.TrimSpace(actorUserID)
+	channelChatID = strings.TrimSpace(channelChatID)
+	targetUserID = strings.TrimSpace(targetUserID)
+	if actorUserID == "" || channelChatID == "" || targetUserID == "" {
+		return invalidArg("error.chat.invalid_input")
+	}
+	channel, err := s.chats.GetChat(ctx, channelChatID)
+	if err != nil {
+		return mapChatOrMessageRepoError(err)
+	}
+	if !isStandaloneChannel(channel) {
+		return invalidArg("error.chat.invalid_input")
+	}
+	role, err := s.chats.GetChatMemberRole(ctx, channelChatID, actorUserID)
+	if err != nil {
+		return mapChatOrMessageRepoError(err)
+	}
+	if !canPostPublicChannelByRole(role) {
+		return forbidden("error.chat.forbidden")
+	}
+	if err := s.chats.DeletePublicChannelMute(ctx, channelChatID, targetUserID); err != nil {
+		return internal(err)
+	}
+	return nil
+}
+
+func (s *Service) ListPublicChannelBans(ctx context.Context, userID, channelChatID string, limit int) ([]PublicChannelModerationEntry, error) {
+	userID = strings.TrimSpace(userID)
+	channelChatID = strings.TrimSpace(channelChatID)
+	if userID == "" || channelChatID == "" {
+		return nil, invalidArg("error.chat.invalid_input")
+	}
+	channel, err := s.chats.GetChat(ctx, channelChatID)
+	if err != nil {
+		return nil, mapChatOrMessageRepoError(err)
+	}
+	if !isStandaloneChannel(channel) {
+		return nil, invalidArg("error.chat.invalid_input")
+	}
+	role, err := s.chats.GetChatMemberRole(ctx, channelChatID, userID)
+	if err != nil {
+		return nil, mapChatOrMessageRepoError(err)
+	}
+	if !canPostPublicChannelByRole(role) {
+		return nil, forbidden("error.chat.forbidden")
+	}
+	items, err := s.chats.ListPublicChannelBans(ctx, channelChatID, limit)
+	if err != nil {
+		return nil, internal(err)
+	}
+	return items, nil
+}
+
+func (s *Service) ListPublicChannelMutes(ctx context.Context, userID, channelChatID string, limit int) ([]PublicChannelModerationEntry, error) {
+	userID = strings.TrimSpace(userID)
+	channelChatID = strings.TrimSpace(channelChatID)
+	if userID == "" || channelChatID == "" {
+		return nil, invalidArg("error.chat.invalid_input")
+	}
+	channel, err := s.chats.GetChat(ctx, channelChatID)
+	if err != nil {
+		return nil, mapChatOrMessageRepoError(err)
+	}
+	if !isStandaloneChannel(channel) {
+		return nil, invalidArg("error.chat.invalid_input")
+	}
+	role, err := s.chats.GetChatMemberRole(ctx, channelChatID, userID)
+	if err != nil {
+		return nil, mapChatOrMessageRepoError(err)
+	}
+	if !canPostPublicChannelByRole(role) {
+		return nil, forbidden("error.chat.forbidden")
+	}
+	items, err := s.chats.ListPublicChannelMutes(ctx, channelChatID, limit)
+	if err != nil {
+		return nil, internal(err)
+	}
+	return items, nil
+}
+
+func (s *Service) GetOrCreateCommentThread(ctx context.Context, userID, channelChatID, rootMessageID string) (string, error) {
+	userID = strings.TrimSpace(userID)
+	channelChatID = strings.TrimSpace(channelChatID)
+	rootMessageID = strings.TrimSpace(rootMessageID)
+	if userID == "" || channelChatID == "" || rootMessageID == "" {
+		return "", invalidArg("error.chat.invalid_input")
+	}
+
+	channel, err := s.chats.GetChat(ctx, channelChatID)
+	if err != nil {
+		return "", mapChatOrMessageRepoError(err)
+	}
+	if !canHaveCommentThread(channel) {
+		return "", invalidArg("error.chat.invalid_input")
+	}
+	if !channel.CommentsEnabled {
+		return "", forbidden("error.chat.forbidden")
+	}
+	// Public channel comments should be readable without requiring a subscription.
+	// Posting permissions are enforced at message creation time.
+	if banned, banErr := s.chats.IsPublicChannelBanned(ctx, channelChatID, userID); banErr != nil {
+		return "", internal(banErr)
+	} else if banned {
+		return "", forbidden("error.chat.forbidden")
+	}
+
+	meta, metaErr := s.messages.GetMessageMeta(ctx, rootMessageID)
+	if metaErr != nil {
+		return "", mapChatOrMessageRepoError(metaErr)
+	}
+	if strings.TrimSpace(meta.ChatID) != channelChatID {
+		return "", invalidArg("error.chat.invalid_input")
+	}
+	// Root must be a top-level post.
+	if strings.TrimSpace(meta.ReplyToMessageID) != "" {
+		return "", invalidArg("error.chat.invalid_input")
+	}
+
+	threadID, err := s.chats.GetOrCreateCommentThread(ctx, channelChatID, rootMessageID, userID)
+	if err != nil {
+		return "", internal(err)
+	}
+	return strings.TrimSpace(threadID), nil
 }
 
 func (s *Service) CreateDirectMessage(ctx context.Context, input CreateDirectMessageInput) (Message, Chat, error) {
@@ -324,7 +530,7 @@ func (s *Service) ListMembers(ctx context.Context, userID, chatID string, includ
 	if err != nil {
 		return nil, mapChatOrMessageRepoError(err)
 	}
-	if strings.TrimSpace(strings.ToLower(target.Kind)) == "public_channel" {
+	if isStandaloneChannel(target) {
 		role, err := s.chats.GetChatMemberRole(ctx, chatID, userID)
 		if err != nil {
 			return nil, internal(err)
@@ -352,7 +558,7 @@ func (s *Service) SubscribePublicChannel(ctx context.Context, userID, chatID str
 	if err != nil {
 		return Chat{}, mapChatOrMessageRepoError(err)
 	}
-	if strings.TrimSpace(strings.ToLower(target.Kind)) != "public_channel" || !target.IsPublic {
+	if !isStandaloneChannel(target) || !target.IsPublic {
 		return Chat{}, invalidArg("error.chat.invalid_input")
 	}
 
@@ -394,7 +600,7 @@ func (s *Service) UnsubscribePublicChannel(ctx context.Context, userID, chatID s
 	if err != nil {
 		return mapChatOrMessageRepoError(err)
 	}
-	if strings.TrimSpace(strings.ToLower(target.Kind)) != "public_channel" || !target.IsPublic {
+	if !isStandaloneChannel(target) || !target.IsPublic {
 		return invalidArg("error.chat.invalid_input")
 	}
 
@@ -470,7 +676,7 @@ func (s *Service) AddMembers(ctx context.Context, userID, chatID string, memberI
 			_, _, _ = s.CreateDirectMessage(ctx, CreateDirectMessageInput{
 				UserID:          userID,
 				RecipientUserID: memberID,
-				Content:         "You were invited to chat \"" + target.Title + "\"\nhttps://app.combox.local/#invite:" + invite.Token,
+				Content:         "You were invited to chat \"" + target.Title + "\"\n" + s.inviteURL(invite.Token),
 			})
 		}
 		return s.ListMembers(ctx, userID, chatID, false)
@@ -494,8 +700,8 @@ func (s *Service) UpdateMemberRole(ctx context.Context, actorUserID, chatID, tar
 		return nil, mapChatOrMessageRepoError(err)
 	}
 	validRole := false
-	switch strings.TrimSpace(strings.ToLower(target.Kind)) {
-	case "public_channel":
+	switch {
+	case isStandaloneChannel(target):
 		switch role {
 		case "subscriber", "admin", "banned":
 			validRole = true

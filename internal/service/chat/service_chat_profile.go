@@ -27,7 +27,7 @@ func (s *Service) GetChat(ctx context.Context, userID, chatID string) (Chat, err
 		return Chat{}, mapChatOrMessageRepoError(err)
 	}
 
-	if strings.TrimSpace(strings.ToLower(target.Kind)) == "public_channel" && target.IsPublic {
+	if isStandaloneChannel(target) && target.IsPublic {
 		role, roleErr := s.chats.GetChatMemberRole(ctx, chatID, userID)
 		switch {
 		case roleErr == nil:
@@ -110,7 +110,7 @@ func (s *Service) UpdateChat(ctx context.Context, input UpdateChatInput) (Chat, 
 			input.AvatarGradient.Value = &value
 		}
 	}
-	if target.Kind == "public_channel" {
+	if isStandaloneChannel(target) {
 		if input.IsPublic.Set {
 			if !input.IsPublic.Value {
 				input.PublicSlug = OptionalString{Set: true, Value: nil}

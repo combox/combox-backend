@@ -78,15 +78,21 @@ type Chat struct {
 }
 
 type ChatInviteLink struct {
-	ID        string     `json:"id"`
-	ChatID    string     `json:"chat_id"`
-	CreatedBy string     `json:"created_by"`
-	Token     string     `json:"token"`
-	Title     *string    `json:"title,omitempty"`
-	IsPrimary bool       `json:"is_primary"`
-	UseCount  int        `json:"use_count"`
-	RevokedAt *time.Time `json:"revoked_at,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID        string  `json:"id"`
+	ChatID    string  `json:"chat_id"`
+	CreatedBy string  `json:"created_by"`
+	Token     string  `json:"token"`
+	Title     *string `json:"title"`
+	IsPrimary bool    `json:"is_primary"`
+	UseCount  int     `json:"use_count"`
+	RevokedAt *string `json:"revoked_at"`
+	CreatedAt string  `json:"created_at"`
+}
+
+type PublicChannelModerationEntry struct {
+	UserID    string `json:"user_id"`
+	CreatedBy string `json:"created_by"`
+	CreatedAt string `json:"created_at"`
 }
 
 type ChatMember struct {
@@ -133,8 +139,9 @@ type E2EPayload struct {
 }
 
 type MessagePage struct {
-	Items      []Message `json:"items"`
-	NextCursor string    `json:"next_cursor,omitempty"`
+	Items      []Message       `json:"items"`
+	Statuses   []MessageStatus `json:"statuses,omitempty"`
+	NextCursor string          `json:"next_cursor,omitempty"`
 }
 
 type CreateChatInput struct {
@@ -227,7 +234,17 @@ type ChatRepository interface {
 	CreateChat(ctx context.Context, title string, memberIDs []string, creatorID string, chatType string) (Chat, error)
 	CreateChannel(ctx context.Context, parentChatID, title, channelType, creatorID string) (Chat, error)
 	CreatePublicChannel(ctx context.Context, title, publicSlug, creatorID string, isPublic bool) (Chat, error)
+	GetOrCreateCommentThread(ctx context.Context, channelChatID, rootMessageID, creatorUserID string) (threadChatID string, err error)
+	IsPublicChannelBanned(ctx context.Context, channelChatID, userID string) (bool, error)
+	IsPublicChannelMuted(ctx context.Context, channelChatID, userID string) (bool, error)
+	UpsertPublicChannelBan(ctx context.Context, channelChatID, userID, actorUserID string) error
+	DeletePublicChannelBan(ctx context.Context, channelChatID, userID string) error
+	UpsertPublicChannelMute(ctx context.Context, channelChatID, userID, actorUserID string) error
+	DeletePublicChannelMute(ctx context.Context, channelChatID, userID string) error
+	ListPublicChannelBans(ctx context.Context, channelChatID string, limit int) ([]PublicChannelModerationEntry, error)
+	ListPublicChannelMutes(ctx context.Context, channelChatID string, limit int) ([]PublicChannelModerationEntry, error)
 	DeleteChannel(ctx context.Context, parentChatID, channelChatID string) error
+	DeleteChat(ctx context.Context, chatID string) error
 	FindDirectChatByMembers(ctx context.Context, userAID, userBID, chatType string) (Chat, bool, error)
 	ListChatsByUser(ctx context.Context, userID string) ([]Chat, error)
 	ListChannelsByParent(ctx context.Context, parentChatID, userID string) ([]Chat, error)
@@ -264,6 +281,7 @@ type MessageRepository interface {
 
 type StatusRepository interface {
 	UpsertMessageStatus(ctx context.Context, chatID, messageID, userID, status string, at time.Time) (MessageStatus, error)
+	ListLatestMessageStatuses(ctx context.Context, messageIDs []string) ([]MessageStatus, error)
 }
 
 type MessageEventPublisher interface {
@@ -381,6 +399,9 @@ type Service struct {
 	avatarTTL     time.Duration
 	invites       InviteRepository
 	inviteTTL     time.Duration
+	// publicAppBaseURL is used to generate human-friendly invite links sent in messages.
+	// If empty, we fall back to a relative URL (works inside the web app origin).
+	publicAppBaseURL string
 }
 
 var ErrChatNotFound = errors.New("chat not found")
@@ -444,6 +465,23 @@ func (s *Service) SetInviteRepository(repo InviteRepository, ttl time.Duration) 
 		ttl = defaultInviteTTL
 	}
 	s.inviteTTL = ttl
+}
+
+func (s *Service) SetPublicAppBaseURL(base string) {
+	base = strings.TrimSpace(base)
+	base = strings.TrimRight(base, "/")
+	s.publicAppBaseURL = base
+}
+
+func (s *Service) inviteURL(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	if s.publicAppBaseURL == "" {
+		return "/#invite:" + token
+	}
+	return s.publicAppBaseURL + "/#invite:" + token
 }
 
 func (s *Service) resolveAvatarURL(ctx context.Context, raw *string) *string {

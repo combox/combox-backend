@@ -2,6 +2,7 @@ package http
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -593,6 +594,17 @@ func newChatMessagesHandler(chat ChatService, i18n Translator, defaultLocale str
 				writeJSON(w, http.StatusOK, map[string]any{"chat": item})
 				return
 			}
+			if r.Method == http.MethodDelete {
+				if err := chat.DeleteChat(r.Context(), userID, targetChatID); err != nil {
+					writeChatServiceError(w, r, err, i18n, defaultLocale)
+					return
+				}
+				locale := requestLocale(r, defaultLocale)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"message": i18n.Translate(locale, "status.ok"),
+				})
+				return
+			}
 			if r.Method != http.MethodPatch {
 				writeMethodNotAllowed(w, r, i18n, defaultLocale)
 				return
@@ -900,6 +912,7 @@ func newChatMessagesHandler(chat ChatService, i18n Translator, defaultLocale str
 			writeJSON(w, http.StatusOK, map[string]any{
 				"message":     i18n.Translate(locale, "message.list.success"),
 				"items":       page.Items,
+				"statuses":    page.Statuses,
 				"next_cursor": page.NextCursor,
 			})
 
@@ -973,6 +986,14 @@ func messageStatusFromPath(path string) (string, string, bool) {
 func writeChatServiceError(w http.ResponseWriter, r *http.Request, err error, i18n Translator, defaultLocale string) {
 	var svcErr *chatsvc.Error
 	if errors.As(err, &svcErr) {
+		if svcErr.Code == chatsvc.CodeInternal {
+			slog.Default().Error("chat service internal error",
+				slog.String("request_id", RequestIDFromContext(r.Context())),
+				slog.String("method", r.Method),
+				slog.String("path", r.URL.Path),
+				slog.Any("cause", svcErr.Cause),
+			)
+		}
 		status := http.StatusInternalServerError
 		switch svcErr.Code {
 		case chatsvc.CodeInvalidArgument:
@@ -985,5 +1006,11 @@ func writeChatServiceError(w http.ResponseWriter, r *http.Request, err error, i1
 		writeAPIError(w, r, status, svcErr.Code, svcErr.MessageKey, svcErr.Details, i18n, defaultLocale)
 		return
 	}
+	slog.Default().Error("chat handler unknown error",
+		slog.String("request_id", RequestIDFromContext(r.Context())),
+		slog.String("method", r.Method),
+		slog.String("path", r.URL.Path),
+		slog.Any("error", err),
+	)
 	writeAPIError(w, r, http.StatusInternalServerError, "internal", "error.internal", nil, i18n, defaultLocale)
 }

@@ -7,7 +7,7 @@ import (
 )
 
 func sanitizeMessageReactionsForViewer(chatMeta Chat, item Message) Message {
-	if strings.TrimSpace(strings.ToLower(chatMeta.Kind)) != "public_channel" {
+	if !isStandaloneChannel(chatMeta) {
 		return item
 	}
 	if item.ReplyToMessageID != nil && strings.TrimSpace(*item.ReplyToMessageID) != "" {
@@ -77,15 +77,48 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 		}
 	}
 
-	if userID != "" {
-		if err := s.ensureChatMember(ctx, chatID, userID); err != nil {
-			return Message{}, err
-		}
-	}
-
 	chatMeta, err := s.chats.GetChat(ctx, chatID)
 	if err != nil {
 		return Message{}, mapChatOrMessageRepoError(err)
+	}
+	chatKind := strings.TrimSpace(strings.ToLower(chatMeta.Kind))
+	if userID != "" {
+		switch {
+		case isStandaloneChannel(chatMeta):
+			// Membership required for posting to standalone channels (comments handled via comment_thread).
+			if err := s.ensureChatMember(ctx, chatID, userID); err != nil {
+				return Message{}, err
+			}
+		case chatKind == "comment_thread":
+			parentID := ""
+			if chatMeta.ParentChatID != nil {
+				parentID = strings.TrimSpace(*chatMeta.ParentChatID)
+			}
+			if parentID == "" {
+				return Message{}, forbidden("error.chat.forbidden")
+			}
+			if banned, banErr := s.chats.IsPublicChannelBanned(ctx, parentID, userID); banErr != nil {
+				return Message{}, internal(banErr)
+			} else if banned {
+				return Message{}, forbidden("error.chat.forbidden")
+			}
+			if muted, muteErr := s.chats.IsPublicChannelMuted(ctx, parentID, userID); muteErr != nil {
+				return Message{}, internal(muteErr)
+			} else if muted {
+				return Message{}, forbidden("error.chat.forbidden")
+			}
+			role, roleErr := s.chats.GetChatMemberRole(ctx, parentID, userID)
+			if roleErr != nil {
+				return Message{}, internal(roleErr)
+			}
+			if !canPostPublicChannelByRole(role) {
+				return Message{}, forbidden("error.chat.forbidden")
+			}
+		default:
+			if err := s.ensureChatMember(ctx, chatID, userID); err != nil {
+				return Message{}, err
+			}
+		}
 	}
 	chatType, ok := normalizeChatType(chatMeta.Type)
 	if !ok {
@@ -102,7 +135,17 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 			return Message{}, invalidArg("error.message.plaintext_not_allowed_in_secret")
 		}
 	}
-	if userID != "" && strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "public_channel" {
+	if userID != "" && isStandaloneChannel(chatMeta) {
+		if banned, banErr := s.chats.IsPublicChannelBanned(ctx, chatID, userID); banErr != nil {
+			return Message{}, internal(banErr)
+		} else if banned {
+			return Message{}, forbidden("error.chat.forbidden")
+		}
+		if muted, muteErr := s.chats.IsPublicChannelMuted(ctx, chatID, userID); muteErr != nil {
+			return Message{}, internal(muteErr)
+		} else if muted {
+			return Message{}, forbidden("error.chat.forbidden")
+		}
 		role, err := s.chats.GetChatMemberRole(ctx, chatID, userID)
 		if err != nil {
 			return Message{}, internal(err)
@@ -245,7 +288,13 @@ func (s *Service) ListMessages(ctx context.Context, input ListMessagesInput) (Me
 	if err != nil {
 		return MessagePage{}, mapChatOrMessageRepoError(err)
 	}
-	if strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "public_channel" && chatMeta.IsPublic {
+	kind := strings.TrimSpace(strings.ToLower(chatMeta.Kind))
+	if isStandaloneChannel(chatMeta) && chatMeta.IsPublic {
+		if banned, banErr := s.chats.IsPublicChannelBanned(ctx, chatID, userID); banErr != nil {
+			return MessagePage{}, internal(banErr)
+		} else if banned {
+			return MessagePage{}, forbidden("error.chat.forbidden")
+		}
 		role, roleErr := s.chats.GetChatMemberRole(ctx, chatID, userID)
 		switch {
 		case roleErr == nil:
@@ -259,6 +308,20 @@ func (s *Service) ListMessages(ctx context.Context, input ListMessagesInput) (Me
 		default:
 			return MessagePage{}, internal(roleErr)
 		}
+	} else if kind == "comment_thread" {
+		parentID := ""
+		if chatMeta.ParentChatID != nil {
+			parentID = strings.TrimSpace(*chatMeta.ParentChatID)
+		}
+		if parentID == "" {
+			return MessagePage{}, forbidden("error.chat.forbidden")
+		}
+		if banned, banErr := s.chats.IsPublicChannelBanned(ctx, parentID, userID); banErr != nil {
+			return MessagePage{}, internal(banErr)
+		} else if banned {
+			return MessagePage{}, forbidden("error.chat.forbidden")
+		}
+		// No membership requirement for reading.
 	} else {
 		if err := s.ensureChatMember(ctx, chatID, userID); err != nil {
 			return MessagePage{}, err
@@ -277,6 +340,19 @@ func (s *Service) ListMessages(ctx context.Context, input ListMessagesInput) (Me
 	}
 	for idx := range page.Items {
 		page.Items[idx] = sanitizeMessageReactionsForViewer(chatMeta, page.Items[idx])
+	}
+	if s.statusRepo != nil && len(page.Items) > 0 {
+		messageIDs := make([]string, 0, len(page.Items))
+		for _, item := range page.Items {
+			if id := strings.TrimSpace(item.ID); id != "" {
+				messageIDs = append(messageIDs, id)
+			}
+		}
+		if len(messageIDs) > 0 {
+			if statuses, err := s.statusRepo.ListLatestMessageStatuses(ctx, messageIDs); err == nil && len(statuses) > 0 {
+				page.Statuses = statuses
+			}
+		}
 	}
 	return page, nil
 }
