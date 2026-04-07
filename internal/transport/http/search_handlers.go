@@ -27,6 +27,12 @@ func newSearchHandler(svc SearchService, i18n Translator, defaultLocale string) 
 				limit = parsed
 			}
 		}
+		if limit <= 0 {
+			limit = 20
+		}
+		if limit > 100 {
+			limit = 100
+		}
 
 		items, err := svc.Search(r.Context(), q, scope, limit)
 		if err != nil {
