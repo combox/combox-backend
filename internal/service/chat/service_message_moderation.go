@@ -327,9 +327,6 @@ func (s *Service) ToggleMessageReactionByID(ctx context.Context, userID, message
 		ChatID:    meta.ChatID,
 		Reactions: reactions,
 	})
-	if strings.TrimSpace(meta.ReplyToMessageID) != "" {
-		sanitized.ReplyToMessageID = &meta.ReplyToMessageID
-	}
 	reactions = sanitized.Reactions
 
 	if s.publisher != nil {

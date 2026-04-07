@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,9 +17,12 @@ import (
 )
 
 const (
-	importURLTimeout  = 30 * time.Second
-	maxImportURLBytes = int64(64 * 1024 * 1024)
+	importURLTimeout        = 30 * time.Second
+	importURLResolveTimeout = 5 * time.Second
+	maxImportURLBytes       = int64(64 * 1024 * 1024)
 )
+
+var importURLLookupIP = net.DefaultResolver.LookupIP
 
 // importURLClient is configured with a custom DialContext to prevent SSRF and DNS Rebinding.
 // It resolves the IP once, validates it, and connects directly to that IP.
@@ -38,7 +40,7 @@ var importURLClient = &http.Client{
 			}
 
 			// Perform DNS lookup manually to validate the resulting IP before connection.
-			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+			ips, err := importURLLookupIP(ctx, "ip", host)
 			if err != nil {
 				return nil, err
 			}
@@ -225,17 +227,17 @@ func sanitizeFilename(name string) string {
 	return safe
 }
 
-func isAllowedImportHost(hostname string) bool {
+func canonicalAllowedImportHost(hostname string) (string, bool) {
 	hostname = strings.ToLower(strings.TrimSpace(hostname))
 	if hostname == "" {
-		return false
+		return "", false
 	}
-	for _, suf := range allowedImportHostSuffixes {
-		if hostname == suf || strings.HasSuffix(hostname, "."+suf) {
-			return true
+	for _, allowed := range allowedImportHostSuffixes {
+		if hostname == allowed {
+			return allowed, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func isPrivateOrLocalIP(ip net.IP) bool {
@@ -255,7 +257,7 @@ func isPrivateOrLocalIP(ip net.IP) bool {
 }
 
 // validateImportURL checks URL structure and allowlist before making any network calls.
-func validateImportURL(parsed *url.URL) error {
+func validateImportURL(ctx context.Context, parsed *url.URL) error {
 	if parsed == nil {
 		return fmt.Errorf("invalid url")
 	}
@@ -268,7 +270,11 @@ func validateImportURL(parsed *url.URL) error {
 		return fmt.Errorf("prohibited host")
 	}
 
-	if !isAllowedImportHost(hostname) {
+	if ip := net.ParseIP(hostname); ip != nil {
+		return fmt.Errorf("ip literals are not allowed")
+	}
+
+	if _, ok := canonicalAllowedImportHost(hostname); !ok {
 		return fmt.Errorf("host not in allowlist")
 	}
 
@@ -276,10 +282,20 @@ func validateImportURL(parsed *url.URL) error {
 		return fmt.Errorf("authentication in URL is not allowed")
 	}
 
-	if port := parsed.Port(); port != "" {
-		p, err := strconv.Atoi(port)
-		if err != nil || (p != 80 && p != 443) {
-			return fmt.Errorf("prohibited port")
+	if parsed.Port() != "" {
+		return fmt.Errorf("explicit port is not allowed")
+	}
+
+	ips, err := importURLLookupIP(ctx, "ip", hostname)
+	if err != nil {
+		return fmt.Errorf("dns lookup failed: %w", err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("dns lookup returned no records")
+	}
+	for _, ip := range ips {
+		if isPrivateOrLocalIP(ip) {
+			return fmt.Errorf("blocked private/local ip %s", ip.String())
 		}
 	}
 
@@ -300,15 +316,23 @@ func (s *Service) ImportFromURL(ctx context.Context, input ImportFromURLInput) (
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
 
-	// Step 1: Structural and Allowlist Validation
-	if err := validateImportURL(parsedURL); err != nil {
+	resolveCtx, resolveCancel := context.WithTimeout(ctx, importURLResolveTimeout)
+	defer resolveCancel()
+
+	// Step 1: Structural, allowlist, and DNS/IP validation.
+	if err := validateImportURL(resolveCtx, parsedURL); err != nil {
 		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
 	}
 
-	// Step 2: Strip sensitive components (query, fragments) to prevent injection.
+	canonicalHost, ok := canonicalAllowedImportHost(parsedURL.Hostname())
+	if !ok {
+		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+	}
+
+	// Step 2: Strip sensitive components (query, fragments) and use canonical host.
 	validatedURL := url.URL{
 		Scheme: parsedURL.Scheme,
-		Host:   parsedURL.Host,
+		Host:   canonicalHost,
 		Path:   parsedURL.Path,
 	}
 

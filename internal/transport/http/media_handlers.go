@@ -3,7 +3,9 @@ package http
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -63,6 +65,31 @@ type completeSessionRequest struct {
 type importAttachmentURLRequest struct {
 	SourceURL string `json:"source_url"`
 	Filename  string `json:"filename"`
+}
+
+func sanitizeImportAttachmentSourceURL(raw string) (string, error) {
+	source := strings.TrimSpace(raw)
+	if source == "" {
+		return "", errors.New("empty source_url")
+	}
+	parsed, err := url.Parse(source)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", errors.New("unsupported scheme")
+	}
+	if parsed.User != nil {
+		return "", errors.New("userinfo is not allowed")
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" || host == "localhost" || strings.HasSuffix(strings.ToLower(host), ".local") {
+		return "", errors.New("prohibited host")
+	}
+	if net.ParseIP(host) != nil {
+		return "", errors.New("ip literal host is not allowed")
+	}
+	return source, nil
 }
 
 func attachmentIDFromPath(path string) (string, bool) {
@@ -247,9 +274,14 @@ func newMediaAttachmentByIDHandler(svc MediaService, i18n Translator, defaultLoc
 				writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
 				return
 			}
+			sourceURL, err := sanitizeImportAttachmentSourceURL(req.SourceURL)
+			if err != nil {
+				writeAPIError(w, r, http.StatusBadRequest, "invalid_argument", "error.media.invalid_input", nil, i18n, defaultLocale)
+				return
+			}
 			out, err := svc.ImportFromURL(r.Context(), mediasvc.ImportFromURLInput{
 				UserID:    userID,
-				SourceURL: req.SourceURL,
+				SourceURL: sourceURL,
 				Filename:  req.Filename,
 			})
 			if err != nil {

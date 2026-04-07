@@ -1470,7 +1470,7 @@ func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, lim
 	}
 	defer rows.Close()
 
-	out := make([]chat.Message, 0, limit)
+	out := make([]chat.Message, 0)
 	for rows.Next() {
 		var item chat.Message
 		var senderDeviceID *string
@@ -1581,7 +1581,7 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 	}
 	defer rows.Close()
 
-	out := make([]chat.Message, 0, limit)
+	out := make([]chat.Message, 0)
 	for rows.Next() {
 		var item chat.Message
 		var senderDeviceID *string
