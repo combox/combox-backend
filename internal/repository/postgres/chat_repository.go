@@ -1463,7 +1463,7 @@ func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, lim
 		args = append(args, cursorTS, cursorID)
 	}
 
-	query := fmt.Sprintf(baseQuery, condition)
+	query := strings.Replace(baseQuery, "%s", condition, 1)
 	rows, err := r.client.pool.Query(ctx, query, args...)
 	if err != nil {
 		return chat.MessagePage{}, err
@@ -1574,7 +1574,7 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 		args = append(args, cursorTS, cursorID)
 	}
 
-	query := fmt.Sprintf(baseQuery, condition)
+	query := strings.Replace(baseQuery, "%s", condition, 1)
 	rows, err := r.client.pool.Query(ctx, query, args...)
 	if err != nil {
 		return chat.MessagePage{}, err

@@ -373,9 +373,46 @@ func newPublicChannelByIDHandler(chat ChatService, i18n Translator, defaultLocal
 			}
 		}
 
-		if _, ok := publicChannelIDOnlyFromPath(r.URL.Path); ok {
-			writeMethodNotAllowed(w, r, i18n, defaultLocale)
-			return
+		if channelID, ok := publicChannelIDOnlyFromPath(r.URL.Path); ok {
+			switch r.Method {
+			case http.MethodGet:
+				item, err := chat.GetChat(r.Context(), userID, channelID)
+				if err != nil {
+					writeChatServiceError(w, r, err, i18n, defaultLocale)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"chat": item})
+				return
+			case http.MethodPatch:
+				var req updateChatRequest
+				if err := decodeJSON(r, &req); err != nil {
+					writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+					return
+				}
+				updated, err := chat.UpdateChat(r.Context(), chatsvc.UpdateChatInput{
+					UserID:          userID,
+					ChatID:          channelID,
+					Title:           chatsvc.OptionalString{Set: req.Title != nil, Value: req.Title},
+					AvatarDataURL:   chatsvc.OptionalString{Set: req.AvatarDataURL != nil, Value: req.AvatarDataURL},
+					AvatarGradient:  chatsvc.OptionalString{Set: req.AvatarGradient != nil, Value: req.AvatarGradient},
+					CommentsEnabled: chatsvc.OptionalBool{Set: req.CommentsEnabled != nil, Value: req.CommentsEnabled != nil && *req.CommentsEnabled},
+					IsPublic:        chatsvc.OptionalBool{Set: req.IsPublic != nil, Value: req.IsPublic != nil && *req.IsPublic},
+					PublicSlug:      chatsvc.OptionalString{Set: req.PublicSlug != nil, Value: req.PublicSlug},
+				})
+				if err != nil {
+					writeChatServiceError(w, r, err, i18n, defaultLocale)
+					return
+				}
+				locale := requestLocale(r, defaultLocale)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"message": i18n.Translate(locale, "status.ok"),
+					"chat":    updated,
+				})
+				return
+			default:
+				writeMethodNotAllowed(w, r, i18n, defaultLocale)
+				return
+			}
 		}
 
 		writeAPIError(w, r, http.StatusNotFound, "not_found", "error.request.not_found", nil, i18n, defaultLocale)

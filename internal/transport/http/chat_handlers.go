@@ -22,12 +22,13 @@ type createChannelRequest struct {
 }
 
 type updateChatRequest struct {
-	Title           *string `json:"title"`
-	AvatarDataURL   *string `json:"avatar_data_url"`
-	AvatarGradient  *string `json:"avatar_gradient"`
-	CommentsEnabled *bool   `json:"comments_enabled"`
-	IsPublic        *bool   `json:"is_public"`
-	PublicSlug      *string `json:"public_slug"`
+	Title             *string `json:"title"`
+	AvatarDataURL     *string `json:"avatar_data_url"`
+	AvatarGradient    *string `json:"avatar_gradient"`
+	CommentsEnabled   *bool   `json:"comments_enabled"`
+	ReactionsEnabled  *bool   `json:"reactions_enabled"`
+	IsPublic          *bool   `json:"is_public"`
+	PublicSlug        *string `json:"public_slug"`
 }
 
 type createInviteLinkRequest struct {

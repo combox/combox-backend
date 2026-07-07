@@ -196,6 +196,8 @@ type Config struct {
 const (
 	defaultAvatarURLTTL = 24 * time.Hour * 7
 	avatarRefPrefix     = "s3key:"
+	maxAvatarDataURLLen = 8 * 1024 * 1024
+	maxNameLen          = 64
 )
 
 func New(cfg Config) (*Service, error) {
@@ -597,7 +599,7 @@ func (s *Service) UpdateProfile(ctx context.Context, input UpdateProfileInput) (
 			}
 		}
 		v := strings.TrimSpace(*input.FirstName.Value)
-		if v == "" {
+		if v == "" || len([]rune(v)) > maxNameLen {
 			return User{}, &Error{
 				Code:       CodeInvalidArgument,
 				MessageKey: "error.auth.invalid_input",
@@ -637,6 +639,11 @@ func (s *Service) UpdateProfile(ctx context.Context, input UpdateProfileInput) (
 		v := strings.TrimSpace(*input.AvatarDataURL.Value)
 		if v == "" {
 			input.AvatarDataURL.Value = nil
+		} else if len(v) > maxAvatarDataURLLen {
+			return User{}, &Error{
+				Code:       CodeInvalidArgument,
+				MessageKey: "error.auth.invalid_input",
+			}
 		} else if s.avatars != nil {
 			objectKey, err := s.uploadAvatarDataURL(ctx, v)
 			if err != nil {

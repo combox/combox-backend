@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+const (
+	maxMessageContentLen = 4000
+	maxE2EEnvelopeLen    = 1 << 16
+)
+
 func sanitizeMessageReactionsForViewer(chatMeta Chat, item Message) Message {
 	if !isStandaloneChannel(chatMeta) {
 		return item
@@ -74,7 +79,14 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 			if strings.TrimSpace(env.RecipientDeviceID) == "" || strings.TrimSpace(env.Alg) == "" || strings.TrimSpace(env.Header) == "" || strings.TrimSpace(env.Ciphertext) == "" {
 				return Message{}, invalidArg("error.message.invalid_e2e_payload")
 			}
+			if len(env.Header) > maxE2EEnvelopeLen || len(env.Ciphertext) > maxE2EEnvelopeLen {
+				return Message{}, invalidArg("error.message.invalid_e2e_payload")
+			}
 		}
+	}
+
+	if !isE2E && len([]rune(content)) > maxMessageContentLen {
+		return Message{}, invalidArg("error.message.invalid_input")
 	}
 
 	chatMeta, err := s.chats.GetChat(ctx, chatID)
