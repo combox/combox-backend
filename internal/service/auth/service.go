@@ -104,6 +104,7 @@ type SessionRepository interface {
 	Create(ctx context.Context, input CreateSessionInput) (Session, error)
 	FindByID(ctx context.Context, sessionID string) (Session, error)
 	UpdateRefresh(ctx context.Context, sessionID, refreshTokenHash string, expiresAt time.Time) error
+	UpdateExpiryByUser(ctx context.Context, userID string, expiresAt time.Time) error
 	DeleteByID(ctx context.Context, sessionID string) error
 }
 
@@ -749,6 +750,19 @@ func (s *Service) UpdateSessionIdleTTL(ctx context.Context, userID string, sessi
 			Cause:      err,
 		}
 	}
+
+	idleTTL := s.refreshTTL
+	if sessionIdleTTLSeconds != nil {
+		idleTTL = time.Duration(*sessionIdleTTLSeconds) * time.Second
+	}
+	if err := s.sessions.UpdateExpiryByUser(ctx, userID, s.nowFn().UTC().Add(idleTTL)); err != nil {
+		return User{}, &Error{
+			Code:       CodeInternal,
+			MessageKey: "error.internal",
+			Cause:      err,
+		}
+	}
+
 	user, err := s.users.FindByID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
