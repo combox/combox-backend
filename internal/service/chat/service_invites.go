@@ -59,6 +59,10 @@ func (s *Service) LeaveChat(ctx context.Context, userID, chatID string) error {
 	if err != nil {
 		return mapChatOrMessageRepoError(err)
 	}
+	// The saved self-chat cannot be left: it is the owner's private storage.
+	if IsSavedChat(target) {
+		return forbidden("error.chat.forbidden")
+	}
 	if target.IsDirect {
 		return invalidArg("error.chat.invalid_input")
 	}

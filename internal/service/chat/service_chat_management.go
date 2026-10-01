@@ -9,16 +9,37 @@ import (
 func (s *Service) CreateChat(ctx context.Context, input CreateChatInput) (Chat, error) {
 	userID := strings.TrimSpace(input.UserID)
 	title := strings.TrimSpace(input.Title)
+	kind := strings.TrimSpace(strings.ToLower(input.Kind))
+	if kind != "" && kind != ChatKindGroup && kind != ChatKindDirect && kind != ChatKindSaved {
+		return Chat{}, invalidArg("error.chat.invalid_input")
+	}
+	// A saved self-chat needs no title from the caller: an empty title falls
+	// back to the default (the sidebar renders the localized label anyway).
+	// The branch runs before the title check below so ensure calls with an
+	// empty title still succeed.
+	if kind == ChatKindSaved {
+		if userID == "" {
+			return Chat{}, invalidArg("error.chat.invalid_input")
+		}
+		chatType, ok := normalizeChatType(input.Type)
+		if !ok {
+			return Chat{}, invalidArg("error.chat.invalid_type")
+		}
+		if chatType == ChatTypeSecretE2E {
+			return Chat{}, invalidArg("error.chat.secret_must_be_direct")
+		}
+		saved, err := s.ensureSavedChat(ctx, userID, title)
+		if err != nil {
+			return Chat{}, err
+		}
+		return saved, nil
+	}
 	if userID == "" || title == "" {
 		return Chat{}, invalidArg("error.chat.invalid_input")
 	}
 	chatType, ok := normalizeChatType(input.Type)
 	if !ok {
 		return Chat{}, invalidArg("error.chat.invalid_type")
-	}
-	kind := strings.TrimSpace(strings.ToLower(input.Kind))
-	if kind != "" && kind != ChatKindGroup && kind != ChatKindDirect {
-		return Chat{}, invalidArg("error.chat.invalid_input")
 	}
 	// An explicitly requested group must never be collapsed into a direct chat.
 	forceGroup := kind == ChatKindGroup
@@ -302,6 +323,23 @@ func (s *Service) ListChats(ctx context.Context, userID string) ([]Chat, error) 
 	chats, err := s.chats.ListChatsByUser(ctx, userID)
 	if err != nil {
 		return nil, internal(err)
+	}
+	// Lazy self-chat: the first list that finds no 'saved' row creates it, so
+	// the sidebar and the forward picker see Saved Messages without any
+	// explicit client call. Best effort: a creation failure never fails the
+	// list itself (the next list retries).
+	hasSaved := false
+	for i := range chats {
+		if IsSavedChat(chats[i]) {
+			hasSaved = true
+			break
+		}
+	}
+	if !hasSaved {
+		if saved, cerr := s.ensureSavedChat(ctx, userID, ""); cerr == nil && strings.TrimSpace(saved.ID) != "" {
+			saved.AvatarURL = s.resolveAvatarURL(ctx, saved.AvatarURL)
+			chats = append(chats, saved)
+		}
 	}
 	for i := range chats {
 		chats[i].AvatarURL = s.resolveAvatarURL(ctx, chats[i].AvatarURL)
@@ -674,6 +712,10 @@ func (s *Service) AddMembers(ctx context.Context, userID, chatID string, memberI
 	target, err := s.chats.GetChat(ctx, chatID)
 	if err != nil {
 		return nil, mapChatOrMessageRepoError(err)
+	}
+	// The saved self-chat is strictly single-member: members can never be added.
+	if IsSavedChat(target) {
+		return nil, invalidArg("error.chat.invalid_input")
 	}
 	if target.IsDirect {
 		return nil, invalidArg("error.chat.invalid_input")

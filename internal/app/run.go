@@ -35,6 +35,7 @@ import (
 	mediasvc "combox-backend/internal/service/media"
 	privacysvc "combox-backend/internal/service/privacy"
 	profilephotosvc "combox-backend/internal/service/profilephoto"
+	reportsvc "combox-backend/internal/service/reports"
 	searchsvc "combox-backend/internal/service/search"
 	settingssvc "combox-backend/internal/service/settings"
 	translatesvc "combox-backend/internal/service/translate"
@@ -496,6 +497,41 @@ func (a profilePhotoChatAccess) CanViewChatPhotos(ctx context.Context, viewerID,
 	return nil
 }
 
+// CanDeleteChatPhotos mirrors the chat avatar edit gate (owner / admin /
+// moderator): whoever may set the chat avatar may prune its history. A
+// plain member or an outsider gets ErrForbidden.
+func (a profilePhotoChatAccess) CanDeleteChatPhotos(ctx context.Context, viewerID, chatID string) error {
+	if a.chat == nil {
+		return profilephotosvc.ErrForbidden
+	}
+	if strings.TrimSpace(viewerID) == "" || strings.TrimSpace(chatID) == "" {
+		return profilephotosvc.ErrNotFound
+	}
+	target, err := a.chat.GetChat(ctx, viewerID, chatID)
+	if err != nil {
+		var svcErr *chatsvc.Error
+		if errors.As(err, &svcErr) {
+			switch svcErr.Code {
+			case chatsvc.CodeNotFound:
+				return profilephotosvc.ErrNotFound
+			case chatsvc.CodeForbidden:
+				return profilephotosvc.ErrForbidden
+			}
+		}
+		return err
+	}
+	role := ""
+	if target.ViewerRole != nil {
+		role = strings.ToLower(strings.TrimSpace(*target.ViewerRole))
+	}
+	switch role {
+	case "owner", "admin", "moderator":
+		return nil
+	default:
+		return profilephotosvc.ErrForbidden
+	}
+}
+
 type sharedChatAudience struct {
 	chats chatsvc.ChatRepository
 }
@@ -727,6 +763,13 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("init blocked users service: %w", err)
 	}
 
+	// User reports for the Report buttons (POST /api/private/v1/reports,
+	// migration 000047). Anti-spam is the in-service 10/min sliding window.
+	reportsSvc, err := reportsvc.New(pgrepo.NewReportsRepository(postgresClient))
+	if err != nil {
+		return fmt.Errorf("init reports service: %w", err)
+	}
+
 	authService.SetProfileEventPublisher(profilePublisherAdapter{p: publisher, logger: logger})
 	authService.SetProfileAudienceResolver(sharedChatAudience{chats: chatRepo})
 
@@ -782,6 +825,19 @@ func Run(ctx context.Context) error {
 
 	var callsService *calls.Service
 	{
+		// Fail-fast on out-of-range UDP ports: CallsConfig carries ints
+		// parsed via Atoi (see config.getIntEnv), so a value like 70000
+		// would silently truncate on uint16() (CodeQL
+		// go/incorrect-integer-conversion) and pin the SFU to the wrong
+		// range. Ports are critical, so reject instead of clamping.
+		if cfg.Calls.ICEPortMin < 0 || cfg.Calls.ICEPortMin > 65535 {
+			return fmt.Errorf("invalid CALLS_ICE_PORT_MIN %d: must be 0..65535 (0 = OS ephemeral, set together with CALLS_ICE_PORT_MAX)", cfg.Calls.ICEPortMin)
+		}
+		if cfg.Calls.ICEPortMax < 0 || cfg.Calls.ICEPortMax > 65535 {
+			return fmt.Errorf("invalid CALLS_ICE_PORT_MAX %d: must be 0..65535 (0 = OS ephemeral, set together with CALLS_ICE_PORT_MIN)", cfg.Calls.ICEPortMax)
+		}
+		icePortMin := uint16(cfg.Calls.ICEPortMin)
+		icePortMax := uint16(cfg.Calls.ICEPortMax)
 		buildErr := error(nil)
 		callsService, buildErr = calls.New(calls.Config{
 			Enabled:           cfg.Calls.Enabled,
@@ -791,8 +847,8 @@ func Run(ctx context.Context) error {
 			TURNCredentialTTL: cfg.Calls.TURNCredentialTTL,
 			MeshLimit:         cfg.Calls.MeshLimit,
 			MaxParticipants:   cfg.Calls.MaxParticipants,
-			ICEPortMin:        uint16(cfg.Calls.ICEPortMin),
-			ICEPortMax:        uint16(cfg.Calls.ICEPortMax),
+			ICEPortMin:        icePortMin,
+			ICEPortMax:        icePortMax,
 			AllowLoopback:     cfg.Calls.AllowLoopback,
 			Logger:            logger,
 		}, pgrepo.NewCallRepository(postgresClient), callMemberChecker{chat: chatSvc})
@@ -876,6 +932,7 @@ func Run(ctx context.Context) error {
 		LegacyMailSender: legacyMail,
 		UserSettings:     userSettingsSvc,
 		Blocked:          blockedSvc,
+		Reports:          reportsSvc,
 	})
 
 	httpServer := &http.Server{

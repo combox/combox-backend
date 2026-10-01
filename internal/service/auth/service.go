@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"combox-backend/internal/avatarcrop"
 	profilephotosvc "combox-backend/internal/service/profilephoto"
 
 	"github.com/google/uuid"
@@ -305,7 +306,35 @@ const (
 	maxNameColorLen     = 24
 	maxPlaylistTitleLen = 64
 	maxSavedTracks      = 500
+	// SessionIdleTTLForeverSeconds is the stored sentinel for "Forever / no
+	// auto-logout" in users.session_idle_ttl_seconds. NULL keeps the
+	// historical meaning "use the server default refreshTTL" (existing rows,
+	// never touched by the user); 0 means the user explicitly picked
+	// "Forever" (the SDK sends JSON null for it, the handler maps it to 0).
+	SessionIdleTTLForeverSeconds = int64(0)
+	// maxSessionIdleTTLSeconds caps a custom TTL at 100 years so
+	// time.Duration(seconds)*time.Second can never overflow int64 ns
+	// (~292 years max). The UI only offers up to 30 days; anything larger
+	// is either a mistake or an overflow attempt.
+	maxSessionIdleTTLSeconds = int64(100 * 365 * 24 * 3600)
+	// foreverSessionTTL is the effective session lifetime for "Forever".
+	// sessions.expires_at is NOT NULL, so "no auto-logout" is a far-future
+	// expiry rather than NULL.
+	foreverSessionTTL = 100 * 365 * 24 * time.Hour
 )
+
+// resolveIdleTTL maps the nullable users.session_idle_ttl_seconds onto an
+// effective session lifetime: nil -> server default, 0 -> forever
+// (far-future), n>0 -> n seconds.
+func resolveIdleTTL(userTTL *int64, def time.Duration) time.Duration {
+	if userTTL == nil {
+		return def
+	}
+	if *userTTL == SessionIdleTTLForeverSeconds {
+		return foreverSessionTTL
+	}
+	return time.Duration(*userTTL) * time.Second
+}
 
 func New(cfg Config) (*Service, error) {
 	if cfg.Users == nil {
@@ -471,10 +500,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (User, Toke
 	s.resolveAvatarURL(ctx, &user)
 	s.recordProfilePhoto(ctx, user.ID, uploadedAvatarKey)
 
-	idleTTL := s.refreshTTL
-	if user.SessionIdleTTLSeconds != nil {
-		idleTTL = time.Duration(*user.SessionIdleTTLSeconds) * time.Second
-	}
+	idleTTL := resolveIdleTTL(user.SessionIdleTTLSeconds, s.refreshTTL)
 	tokens, err := s.issueSessionTokens(ctx, user.ID, input.UserAgent, input.IPAddress, idleTTL)
 	if err != nil {
 		return User{}, Tokens{}, err
@@ -521,10 +547,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (User, Tokens, er
 		}
 		s.resolveAvatarURL(ctx, &user)
 
-		idleTTL := s.refreshTTL
-		if user.SessionIdleTTLSeconds != nil {
-			idleTTL = time.Duration(*user.SessionIdleTTLSeconds) * time.Second
-		}
+		idleTTL := resolveIdleTTL(user.SessionIdleTTLSeconds, s.refreshTTL)
 		tokens, err := s.issueSessionTokensWithMigration(ctx, user.ID, input.UserAgent, input.IPAddress, idleTTL, true)
 		if err != nil {
 			return User{}, Tokens{}, err
@@ -542,10 +565,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (User, Tokens, er
 	}
 	s.resolveAvatarURL(ctx, &user)
 
-	idleTTL := s.refreshTTL
-	if user.SessionIdleTTLSeconds != nil {
-		idleTTL = time.Duration(*user.SessionIdleTTLSeconds) * time.Second
-	}
+	idleTTL := resolveIdleTTL(user.SessionIdleTTLSeconds, s.refreshTTL)
 	tokens, err := s.issueSessionTokens(ctx, user.ID, input.UserAgent, input.IPAddress, idleTTL)
 	if err != nil {
 		return User{}, Tokens{}, err
@@ -611,10 +631,7 @@ func (s *Service) Refresh(ctx context.Context, input RefreshInput) (Tokens, erro
 		}
 	}
 
-	idleTTL := s.refreshTTL
-	if user.SessionIdleTTLSeconds != nil {
-		idleTTL = time.Duration(*user.SessionIdleTTLSeconds) * time.Second
-	}
+	idleTTL := resolveIdleTTL(user.SessionIdleTTLSeconds, s.refreshTTL)
 
 	nextRefreshPart, err := newRandomToken(32)
 	if err != nil {
@@ -796,10 +813,7 @@ func (s *Service) CompleteLegacyBind(ctx context.Context, userID, email, userAge
 	}
 	s.resolveAvatarURL(ctx, &user)
 
-	idleTTL := s.refreshTTL
-	if user.SessionIdleTTLSeconds != nil {
-		idleTTL = time.Duration(*user.SessionIdleTTLSeconds) * time.Second
-	}
+	idleTTL := resolveIdleTTL(user.SessionIdleTTLSeconds, s.refreshTTL)
 	tokens, err := s.issueSessionTokens(ctx, user.ID, userAgent, ipAddress, idleTTL)
 	if err != nil {
 		return User{}, Tokens{}, err
@@ -1159,7 +1173,11 @@ func (s *Service) UpdateSessionIdleTTL(ctx context.Context, userID string, sessi
 			MessageKey: "error.auth.invalid_input",
 		}
 	}
-	if sessionIdleTTLSeconds != nil && *sessionIdleTTLSeconds <= 0 {
+	// 0 = "Forever / no auto-logout" (far-future expiry, see
+	// foreverSessionTTL); nil is left to the repository/handler layer.
+	// Negative values and values that would overflow time.Duration are
+	// rejected instead of silently wrapping.
+	if sessionIdleTTLSeconds != nil && (*sessionIdleTTLSeconds < SessionIdleTTLForeverSeconds || *sessionIdleTTLSeconds > maxSessionIdleTTLSeconds) {
 		return User{}, &Error{
 			Code:       CodeInvalidArgument,
 			MessageKey: "error.auth.invalid_input",
@@ -1180,10 +1198,7 @@ func (s *Service) UpdateSessionIdleTTL(ctx context.Context, userID string, sessi
 		}
 	}
 
-	idleTTL := s.refreshTTL
-	if sessionIdleTTLSeconds != nil {
-		idleTTL = time.Duration(*sessionIdleTTLSeconds) * time.Second
-	}
+	idleTTL := resolveIdleTTL(sessionIdleTTLSeconds, s.refreshTTL)
 	if err := s.sessions.UpdateExpiryByUser(ctx, userID, s.nowFn().UTC().Add(idleTTL)); err != nil {
 		return User{}, &Error{
 			Code:       CodeInternal,
@@ -1406,6 +1421,10 @@ func (s *Service) uploadAvatarDataURL(ctx context.Context, raw string) (string, 
 	if err != nil {
 		return "", err
 	}
+	// New uploads are stored center-square (JPEG/PNG are cropped when they
+	// decode, GIF and the rest pass through): the circle UI never stretches
+	// a rectangle, and the archived history keeps whatever was stored.
+	contentType, payload = avatarcrop.Square(contentType, payload)
 	ext := extensionByContentType(contentType)
 	objectKey := fmt.Sprintf("avatars/%s%s", uuid.NewString(), ext)
 	if err := s.avatars.PutObject(ctx, objectKey, contentType, bytes.NewReader(payload), int64(len(payload))); err != nil {

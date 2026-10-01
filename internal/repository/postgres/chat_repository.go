@@ -286,8 +286,8 @@ func (r *ChatRepository) CreateChat(ctx context.Context, title string, memberIDs
 	}()
 
 	const insertChat = `
-		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind, parent_chat_id, channel_type)
-		VALUES ($1, $2, $3::uuid, $4, $5, NULL, NULL)
+		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind, parent_chat_id, channel_type, next_topic_number)
+		VALUES ($1, $2, $3::uuid, $4, $5, NULL, NULL, $6)
 		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, reactions_enabled, sign_messages, show_authors_profiles, auto_translate, slow_mode_seconds, discussion_chat_id::text, parent_chat_id::text, channel_type, bot_id::text, avatar_data_url, avatar_gradient, wallpaper_kind, wallpaper_value, description, icon_emoji, created_at
 	`
 
@@ -303,7 +303,21 @@ func (r *ChatRepository) CreateChat(ctx context.Context, title string, memberIDs
 		isDirect = false
 		chatKind = "group"
 	}
-	err = tx.QueryRow(ctx, insertChat, title, isDirect, creatorID, chatType, chatKind).
+	// A saved self-chat is a single-member row with chat_kind = 'saved'
+	// (migration 000048 enforces one per creator). It is never direct.
+	if strings.TrimSpace(strings.ToLower(kind)) == "saved" {
+		isDirect = false
+		chatKind = "saved"
+	}
+	// New groups start allocating channel topics from 2; without an explicit
+	// seed the column stays NULL and the first allocation must COALESCE it.
+	// Seeding here prevents future NULL counters (legacy NULLs are still
+	// handled by the GREATEST(..., MAX()+1) clamp in CreateChannel).
+	var nextTopic any
+	if chatKind == "group" {
+		nextTopic = 2
+	}
+	err = tx.QueryRow(ctx, insertChat, title, isDirect, creatorID, chatType, chatKind, nextTopic).
 		Scan(
 			&created.ID,
 			&created.Title,
@@ -365,21 +379,12 @@ func (r *ChatRepository) CreateChannel(ctx context.Context, parentChatID, title,
 	}()
 
 	// Allocate next topic number from group.
-	var topicNumber int
-	const allocTopic = `
-		UPDATE chats
-		SET next_topic_number = COALESCE(next_topic_number, 2) + 1,
-		    updated_at = NOW()
-		WHERE id = $1::uuid
-		  AND chat_kind = 'group'
-		RETURNING COALESCE(next_topic_number, 3) - 1
-	`
-	if err := tx.QueryRow(ctx, allocTopic, strings.TrimSpace(parentChatID)).Scan(&topicNumber); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return chat.Chat{}, chat.ErrChatNotFound
-		}
-		return chat.Chat{}, fmt.Errorf("alloc topic: %w", err)
-	}
+	// NOTE: next_topic_number may be NULL or stale (legacy groups, ETL/migrate
+	// inserts that bypassed the allocator). Allocating blindly from
+	// COALESCE(next_topic_number, 2) reuses topic 2 and hits the
+	// idx_channel_topic_number_unique constraint -> 500 on POST /channels.
+	// Clamp the allocation to MAX(topic_number)+1 so a stale counter self-heals.
+	const allocTopic = allocTopicQuery
 
 	const insertChannel = `
 		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind, parent_chat_id, channel_type, topic_number, avatar_data_url, avatar_gradient)
@@ -391,45 +396,69 @@ func (r *ChatRepository) CreateChannel(ctx context.Context, parentChatID, title,
 	`
 
 	var created chat.Chat
-	if err := tx.QueryRow(
-		ctx,
-		insertChannel,
-		strings.TrimSpace(parentChatID),
-		strings.TrimSpace(title),
-		strings.TrimSpace(strings.ToLower(channelType)),
-		topicNumber,
-		strings.TrimSpace(creatorID),
-	).Scan(
-		&created.ID,
-		&created.Title,
-		&created.IsDirect,
-		&created.Type,
-		&created.Kind,
-		&created.IsPublic,
-		&created.PublicSlug,
-		&created.CommentsEnabled,
-		&created.ReactionsEnabled,
-		&created.SignMessages,
-		&created.ShowAuthorsProfiles,
-		&created.AutoTranslate,
-		&created.SlowModeSeconds,
-		&created.DiscussionChatID,
-		&created.ParentChatID,
-		&created.ChannelType,
-		&created.TopicNumber,
-		&created.BotID,
-		&created.AvatarURL,
-		&created.AvatarBg,
-		&created.WallpaperKind,
-		&created.WallpaperValue,
-		&created.Description,
-		&created.IconEmoji,
-		&created.CreatedAt,
-	); err != nil {
+	// Retry on concurrent topic allocation: two creators may compute the same
+	// topic before either commits; the loser hits the unique index and must
+	// re-allocate (the next attempt observes the winner's row in MAX()).
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		var topicNumber int
+		if err := tx.QueryRow(ctx, allocTopic, strings.TrimSpace(parentChatID)).Scan(&topicNumber); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return chat.Chat{}, chat.ErrChatNotFound
+			}
+			return chat.Chat{}, fmt.Errorf("alloc topic: %w", err)
+		}
+
+		err := tx.QueryRow(
+			ctx,
+			insertChannel,
+			strings.TrimSpace(parentChatID),
+			strings.TrimSpace(title),
+			strings.TrimSpace(strings.ToLower(channelType)),
+			topicNumber,
+			strings.TrimSpace(creatorID),
+		).Scan(
+			&created.ID,
+			&created.Title,
+			&created.IsDirect,
+			&created.Type,
+			&created.Kind,
+			&created.IsPublic,
+			&created.PublicSlug,
+			&created.CommentsEnabled,
+			&created.ReactionsEnabled,
+			&created.SignMessages,
+			&created.ShowAuthorsProfiles,
+			&created.AutoTranslate,
+			&created.SlowModeSeconds,
+			&created.DiscussionChatID,
+			&created.ParentChatID,
+			&created.ChannelType,
+			&created.TopicNumber,
+			&created.BotID,
+			&created.AvatarURL,
+			&created.AvatarBg,
+			&created.WallpaperKind,
+			&created.WallpaperValue,
+			&created.Description,
+			&created.IconEmoji,
+			&created.CreatedAt,
+		)
+		if err == nil {
+			lastErr = nil
+			break
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chat.Chat{}, chat.ErrChatNotFound
 		}
+		if isChannelTopicConflict(err) {
+			lastErr = err
+			continue
+		}
 		return chat.Chat{}, fmt.Errorf("insert channel: %w", err)
+	}
+	if lastErr != nil {
+		return chat.Chat{}, fmt.Errorf("insert channel: %w", lastErr)
 	}
 
 	const copyMembers = `
@@ -447,6 +476,51 @@ func (r *ChatRepository) CreateChannel(ctx context.Context, parentChatID, title,
 		return chat.Chat{}, fmt.Errorf("commit tx: %w", err)
 	}
 	return created, nil
+}
+
+// allocTopicQuery allocates the next channel topic_number for a group,
+// clamping a NULL/stale next_topic_number up to MAX(topic_number)+1 so
+// legacy groups self-heal instead of reusing topic 2 and hitting
+// idx_channel_topic_number_unique (POST /channels 500).
+const allocTopicQuery = `
+		UPDATE chats AS g
+		SET next_topic_number = GREATEST(COALESCE(g.next_topic_number, 2), COALESCE(m.max_topic + 1, 2)) + 1,
+		    updated_at = NOW()
+		FROM (SELECT COALESCE(MAX(topic_number), 1) AS max_topic FROM chats WHERE parent_chat_id = $1::uuid AND chat_kind = 'channel') m
+		WHERE g.id = $1::uuid
+		  AND g.chat_kind = 'group'
+		RETURNING g.next_topic_number - 1
+	`
+
+func allocTopicSQLForTest() string { return allocTopicQuery }
+
+// resolveChannelTopicAllocation mirrors the allocTopic UPDATE above in pure Go
+// so the clamping rule is unit-testable without a database:
+// allocated = max(COALESCE(storedNext, 2), maxTopic+1 or 2 when no channels).
+func resolveChannelTopicAllocation(storedNext *int, maxTopic *int) (allocated, newNext int) {
+	base := 2
+	if storedNext != nil && *storedNext > base {
+		base = *storedNext
+	}
+	candidate := 2
+	if maxTopic != nil && *maxTopic+1 > candidate {
+		candidate = *maxTopic + 1
+	}
+	if candidate > base {
+		base = candidate
+	}
+	return base, base + 1
+}
+
+// isChannelTopicConflict reports a unique violation on
+// idx_channel_topic_number_unique (concurrent channel creation).
+func isChannelTopicConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "idx_channel_topic_number_unique") ||
+		(strings.Contains(msg, "duplicate key") && strings.Contains(msg, "topic_number"))
 }
 
 func (r *ChatRepository) CreatePublicChannel(ctx context.Context, title, publicSlug, creatorID string, isPublic bool) (chat.Chat, error) {
@@ -1161,8 +1235,12 @@ func (r *ChatRepository) UpdateChat(ctx context.Context, input chat.UpdateChatIn
 }
 
 func (r *ChatRepository) ListChatInviteLinks(ctx context.Context, chatID string) ([]chat.ChatInviteLink, error) {
+	// NOTE: ChatInviteLink.CreatedAt/RevokedAt are strings, so timestamptz
+	// columns must be cast to text (same idiom as ListPublicChannelBans).
+	// Selecting raw timestamptz makes pgx fail to scan into *string/string
+	// and every list/create call 500s via internal().
 	const query = `
-		SELECT id::text, chat_id::text, created_by::text, token, title, is_primary, use_count, revoked_at, created_at
+		SELECT id::text, chat_id::text, created_by::text, token, title, is_primary, use_count, revoked_at::text, created_at::text
 		FROM chat_invite_links
 		WHERE chat_id = $1::uuid
 		  AND revoked_at IS NULL
@@ -1192,7 +1270,7 @@ func (r *ChatRepository) CreateChatInviteLink(ctx context.Context, chatID, creat
 	const query = `
 		INSERT INTO chat_invite_links (chat_id, created_by, token, title, is_primary)
 		VALUES ($1::uuid, $2::uuid, gen_random_uuid()::text, NULLIF($3, ''), $4)
-		RETURNING id::text, chat_id::text, created_by::text, token, title, is_primary, use_count, revoked_at, created_at
+		RETURNING id::text, chat_id::text, created_by::text, token, title, is_primary, use_count, revoked_at::text, created_at::text
 	`
 	var item chat.ChatInviteLink
 	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(createdBy), strings.TrimSpace(title), isPrimary).
@@ -1204,7 +1282,7 @@ func (r *ChatRepository) CreateChatInviteLink(ctx context.Context, chatID, creat
 
 func (r *ChatRepository) GetChatInviteLinkByToken(ctx context.Context, token string) (chat.ChatInviteLink, error) {
 	const query = `
-		SELECT id::text, chat_id::text, created_by::text, token, title, is_primary, use_count, revoked_at, created_at
+		SELECT id::text, chat_id::text, created_by::text, token, title, is_primary, use_count, revoked_at::text, created_at::text
 		FROM chat_invite_links
 		WHERE token = $1
 		  AND revoked_at IS NULL

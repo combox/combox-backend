@@ -23,6 +23,8 @@ import (
 // a user flagged is_legacy_unverified is werkzeug-only by contract.
 func VerifyWerkzeugScrypt(storedHash, password string) error {
 	storedHash = strings.TrimSpace(storedHash)
+	// ETL keeps the original hash with a marker prefix (see boxchat-migrate).
+	storedHash = strings.TrimPrefix(storedHash, "!legacy!")
 	if !strings.HasPrefix(storedHash, "scrypt:") {
 		return errors.New("not a werkzeug scrypt hash")
 	}
@@ -48,9 +50,11 @@ func VerifyWerkzeugScrypt(storedHash, password string) error {
 		return fmt.Errorf("invalid scrypt p: %q", params[2])
 	}
 
-	salt, err := hex.DecodeString(strings.TrimSpace(parts[1]))
-	if err != nil || len(salt) == 0 {
-		return errors.New("invalid scrypt salt encoding")
+	// Werkzeug stores the salt as a raw ASCII string (gen_salt: letters+digits),
+	// NOT hex-encoded — only the hash part is hex.
+	salt := []byte(strings.TrimSpace(parts[1]))
+	if len(salt) == 0 {
+		return errors.New("empty scrypt salt")
 	}
 	want, err := hex.DecodeString(strings.TrimSpace(parts[2]))
 	if err != nil || len(want) == 0 {

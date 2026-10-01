@@ -19,6 +19,11 @@ type stubProfilePhotos struct {
 	photos []profilephotosvc.Photo
 	err    error
 
+	deleteErr   error
+	lastDelKind string
+	lastDelID   string
+	delCalls    int
+
 	lastViewer string
 	lastKind   string
 	lastOwner  string
@@ -34,6 +39,15 @@ func (s *stubProfilePhotos) List(_ context.Context, viewerID, ownerKind, ownerID
 		return nil, s.err
 	}
 	return s.photos, nil
+}
+
+func (s *stubProfilePhotos) Delete(_ context.Context, viewerID, ownerKind, ownerID, photoID string) error {
+	s.delCalls++
+	s.lastViewer = viewerID
+	s.lastDelKind = ownerKind
+	s.lastOwner = ownerID
+	s.lastDelID = photoID
+	return s.deleteErr
 }
 
 func newProfilePhotoRouter(t *testing.T, photos ProfilePhotoList) (stdhttp.Handler, string) {
@@ -181,5 +195,120 @@ func TestProfilePhotoRoutesRejectOtherMethods(t *testing.T) {
 	}
 	if photos.calls != 0 {
 		t.Fatal("history must not be queried for a rejected method")
+	}
+}
+
+func doPhotoDelete(t *testing.T, router stdhttp.Handler, secret, path string, tokenless bool) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(stdhttp.MethodDelete, path, nil)
+	if !tokenless {
+		token := makeAccessToken(t, "viewer-1", secret, time.Now().UTC().Add(10*time.Minute).Unix())
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestPhotoItemPathParsing(t *testing.T) {
+	if userID, photoID, ok := userPhotoItemFromPath("/api/private/v1/users/abc/photos/p1"); !ok || userID != "abc" || photoID != "p1" {
+		t.Fatalf("userPhotoItemFromPath = %q, %q, %v", userID, photoID, ok)
+	}
+	if _, _, ok := userPhotoItemFromPath("/api/private/v1/users/abc/photos"); ok {
+		t.Fatal("collection path must not parse as an item")
+	}
+	if _, _, ok := userPhotoItemFromPath("/api/private/v1/users/abc/photos/"); ok {
+		t.Fatal("empty photo id must not parse as an item")
+	}
+	if _, _, ok := userPhotoItemFromPath("/api/private/v1/users/abc/photos/p1/more"); ok {
+		t.Fatal("deeper path must not parse as an item")
+	}
+	if chatID, photoID, ok := chatPhotoItemFromPath("/api/private/v1/chats/xyz/photos/p2"); !ok || chatID != "xyz" || photoID != "p2" {
+		t.Fatalf("chatPhotoItemFromPath = %q, %q, %v", chatID, photoID, ok)
+	}
+	if _, _, ok := chatPhotoItemFromPath("/api/private/v1/chats/xyz/photos"); ok {
+		t.Fatal("collection path must not parse as an item")
+	}
+}
+
+func TestUserPhotoItemDelete(t *testing.T) {
+	photos := &stubProfilePhotos{}
+	router, secret := newProfilePhotoRouter(t, photos)
+
+	rr := doPhotoDelete(t, router, secret, "/api/private/v1/users/viewer-1/photos/photo-9", false)
+	if rr.Code != stdhttp.StatusOK {
+		t.Fatalf("expected 200, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+	if photos.delCalls != 1 || photos.lastDelKind != profilephotosvc.OwnerUser || photos.lastOwner != "viewer-1" || photos.lastDelID != "photo-9" {
+		t.Fatalf("unexpected delete call: %+v", photos)
+	}
+	if !strings.Contains(rr.Body.String(), `"id":"photo-9"`) {
+		t.Fatalf("expected the deleted id object, got %s", rr.Body.String())
+	}
+}
+
+func TestChatPhotoItemDelete(t *testing.T) {
+	photos := &stubProfilePhotos{}
+	router, secret := newProfilePhotoRouter(t, photos)
+
+	rr := doPhotoDelete(t, router, secret, "/api/private/v1/chats/chat-9/photos/photo-3", false)
+	if rr.Code != stdhttp.StatusOK {
+		t.Fatalf("expected 200, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+	if photos.delCalls != 1 || photos.lastDelKind != profilephotosvc.OwnerChat || photos.lastOwner != "chat-9" || photos.lastDelID != "photo-3" {
+		t.Fatalf("unexpected delete call: %+v", photos)
+	}
+}
+
+func TestPhotoItemDeleteMapsErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"forbidden", profilephotosvc.ErrForbidden, stdhttp.StatusForbidden},
+		{"not found", profilephotosvc.ErrNotFound, stdhttp.StatusNotFound},
+		{"internal", errors.New("db down"), stdhttp.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			router, secret := newProfilePhotoRouter(t, &stubProfilePhotos{deleteErr: tc.err})
+			rr := doPhotoDelete(t, router, secret, "/api/private/v1/users/viewer-1/photos/photo-9", false)
+			if rr.Code != tc.status {
+				t.Fatalf("expected %d, got %d; body=%s", tc.status, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestPhotoItemRoutesRequireAuthorization(t *testing.T) {
+	router, secret := newProfilePhotoRouter(t, &stubProfilePhotos{})
+
+	for _, path := range []string{
+		"/api/private/v1/users/viewer-1/photos/photo-9",
+		"/api/private/v1/chats/chat-9/photos/photo-3",
+	} {
+		rr := doPhotoDelete(t, router, secret, path, true)
+		if rr.Code != stdhttp.StatusUnauthorized {
+			t.Fatalf("%s: expected 401, got %d", path, rr.Code)
+		}
+	}
+}
+
+func TestPhotoItemRoutesRejectOtherMethods(t *testing.T) {
+	photos := &stubProfilePhotos{}
+	router, secret := newProfilePhotoRouter(t, photos)
+
+	req := httptest.NewRequest(stdhttp.MethodGet, "/api/private/v1/users/viewer-1/photos/photo-9", nil)
+	token := makeAccessToken(t, "viewer-1", secret, time.Now().UTC().Add(10*time.Minute).Unix())
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != stdhttp.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+	if photos.delCalls != 0 {
+		t.Fatal("history must not be deleted for a rejected method")
 	}
 }

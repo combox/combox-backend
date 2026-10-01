@@ -56,6 +56,8 @@ type Photo struct {
 type Store interface {
 	Add(ctx context.Context, ownerKind, ownerID, objectKey string) error
 	List(ctx context.Context, ownerKind, ownerID string, limit int) ([]Record, error)
+	// Delete removes one archived row. A missing row reports ErrNotFound.
+	Delete(ctx context.Context, ownerKind, ownerID, photoID string) error
 }
 
 // Presigner turns an object key into a temporary download URL.
@@ -70,9 +72,12 @@ type UserAccess interface {
 }
 
 // ChatAccess is the privacy gate of a chat's photo history: members only
-// (public channels fall back to "whoever may open the channel").
+// (public channels fall back to "whoever may open the channel"). Deleting
+// needs the edit gate: whoever may change the chat avatar may prune its
+// history.
 type ChatAccess interface {
 	CanViewChatPhotos(ctx context.Context, viewerID, chatID string) error
+	CanDeleteChatPhotos(ctx context.Context, viewerID, chatID string) error
 }
 
 // Config wires the storage, the presigner and the privacy gates.
@@ -190,4 +195,38 @@ func (s *Service) List(ctx context.Context, viewerID, ownerKind, ownerID string)
 		photos = append(photos, Photo{ID: rec.ID, URL: presigned, CreatedAt: rec.CreatedAt, Migrated: isMigratedKey(objectKey)})
 	}
 	return photos, nil
+}
+
+// Delete removes one photo from the owner's history. The stored object
+// itself is left in place (same as clearing the current avatar): only the
+// archive row goes away, so a concurrent viewer holding the presigned URL
+// keeps working until it expires. Callers that delete the CURRENT main
+// photo reset the owner's avatar reference separately.
+func (s *Service) Delete(ctx context.Context, viewerID, ownerKind, ownerID, photoID string) error {
+	viewerID = strings.TrimSpace(viewerID)
+	ownerKind = strings.TrimSpace(ownerKind)
+	ownerID = strings.TrimSpace(ownerID)
+	photoID = strings.TrimSpace(photoID)
+	if viewerID == "" || ownerID == "" || photoID == "" {
+		return ErrNotFound
+	}
+
+	switch ownerKind {
+	case OwnerUser:
+		// Nobody prunes somebody else's history.
+		if viewerID != ownerID {
+			return ErrForbidden
+		}
+	case OwnerChat:
+		if s.chatAccess == nil {
+			return ErrForbidden
+		}
+		if err := s.chatAccess.CanDeleteChatPhotos(ctx, viewerID, ownerID); err != nil {
+			return err
+		}
+	default:
+		return ErrNotFound
+	}
+
+	return s.store.Delete(ctx, ownerKind, ownerID, photoID)
 }

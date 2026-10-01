@@ -19,7 +19,25 @@ const (
 const (
 	ChatKindGroup  = "group"
 	ChatKindDirect = "direct"
+	// ChatKindSaved is a private self-chat ("Saved Messages" / "Избранное"):
+	// one chats row per user with a single member (the owner). It reuses the
+	// ordinary message/forward/reaction paths; the unique marker is
+	// (created_by + chat_kind = 'saved') enforced by migration 000048
+	// (uniq_chats_saved_per_user). There is no self-DM: OpenDirectChat and
+	// CreateDirectMessage reject userID == recipientID, so a direct chat can
+	// never have a single member.
+	ChatKindSaved = "saved"
 )
+
+// IsSavedKind reports whether a chat_kind value is the Saved Messages self-chat.
+func IsSavedKind(kind string) bool {
+	return strings.EqualFold(strings.TrimSpace(kind), ChatKindSaved)
+}
+
+// IsSavedChat reports whether a chat row is the Saved Messages self-chat.
+func IsSavedChat(c Chat) bool {
+	return IsSavedKind(c.Kind)
+}
 
 const (
 	CodeInvalidArgument = "invalid_argument"

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"combox-backend/internal/avatarcrop"
 	profilephotosvc "combox-backend/internal/service/profilephoto"
 
 	"github.com/google/uuid"
@@ -53,6 +54,9 @@ func uploadAvatarDataURL(ctx context.Context, store AvatarStore, raw string) (st
 	if err != nil {
 		return "", err
 	}
+	// Same square guarantee as user avatars: new chat avatars are stored
+	// center-square, history rows are never rewritten.
+	contentType, payload = avatarcrop.Square(contentType, payload)
 	objectKey := fmt.Sprintf("chat-avatars/%s%s", uuid.NewString(), extensionByContentType(contentType))
 	if err := store.PutObject(ctx, objectKey, contentType, bytes.NewReader(payload), int64(len(payload))); err != nil {
 		return "", err

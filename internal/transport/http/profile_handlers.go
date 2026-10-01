@@ -1,9 +1,12 @@
 package http
 
 import (
+	"bytes"
 	vkrepo "combox-backend/internal/repository/valkey"
 	authsvc "combox-backend/internal/service/auth"
 	privacysvc "combox-backend/internal/service/privacy"
+	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -85,10 +88,36 @@ func newProfileHandler(auth AuthService, i18n Translator, defaultLocale string) 
 			return
 		}
 
-		var req profileUpdateRequest
-		if err := decodeJSON(r, &req); err != nil {
+		// PATCH /profile carries session_idle_ttl_seconds alongside the
+		// profile fields. encoding/json decodes both "key absent" and
+		// "key: null" into a nil *int64, but the SDK sends explicit null
+		// for "Forever" (see combox-api updateSessionIdleTTL and the
+		// PrivacySecuritySettings SESSION_TTL_OPTIONS value: null).
+		// Read the raw body once to tell them apart: absent = no TTL
+		// change, null = forever (mapped to 0, the stored sentinel for
+		// no auto-logout), number = custom TTL seconds.
+		body, err := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		if err != nil {
 			writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
 			return
+		}
+		var rawMap map[string]json.RawMessage
+		_ = json.Unmarshal(body, &rawMap)
+		var req profileUpdateRequest
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+			return
+		}
+		ttlSet := false
+		if raw, ok := rawMap["session_idle_ttl_seconds"]; ok {
+			ttlSet = true
+			if strings.TrimSpace(string(raw)) == "null" {
+				forever := authsvc.SessionIdleTTLForeverSeconds
+				req.SessionIdleTTLSeconds = &forever
+			}
 		}
 
 		input := authsvc.UpdateProfileInput{
@@ -109,7 +138,6 @@ func newProfileHandler(auth AuthService, i18n Translator, defaultLocale string) 
 
 		hasProfileFields := req.Username != nil || req.FirstName != nil || req.LastName != nil || req.BirthDate != nil || req.AvatarDataURL != nil || req.AvatarGradient != nil || req.Bio != nil || req.PhoneNumber != nil || req.NameColor != nil || req.PlaylistTitle != nil || req.PlaylistIsPublic != nil || req.SavedTracks != nil
 		var user authsvc.User
-		var err error
 		if hasProfileFields {
 			user, err = auth.UpdateProfile(r.Context(), input)
 			if err != nil {
@@ -117,14 +145,14 @@ func newProfileHandler(auth AuthService, i18n Translator, defaultLocale string) 
 				return
 			}
 		}
-		if req.SessionIdleTTLSeconds != nil {
+		if ttlSet {
 			user, err = auth.UpdateSessionIdleTTL(r.Context(), userID, req.SessionIdleTTLSeconds)
 			if err != nil {
 				writeAuthServiceError(w, r, err, i18n, defaultLocale)
 				return
 			}
 		}
-		if !hasProfileFields && req.SessionIdleTTLSeconds == nil {
+		if !hasProfileFields && !ttlSet {
 			writeAPIError(w, r, http.StatusBadRequest, "invalid_argument", "error.request.invalid_input", nil, i18n, defaultLocale)
 			return
 		}

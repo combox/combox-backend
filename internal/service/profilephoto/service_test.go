@@ -10,7 +10,9 @@ import (
 type fakeStore struct {
 	records   []Record
 	added     []Record
+	deleted   []Record
 	listErr   error
+	deleteErr error
 	lastKind  string
 	lastOwner string
 	lastLimit int
@@ -18,6 +20,14 @@ type fakeStore struct {
 
 func (f *fakeStore) Add(_ context.Context, ownerKind, ownerID, objectKey string) error {
 	f.added = append(f.added, Record{OwnerKind: ownerKind, OwnerID: ownerID, ObjectKey: objectKey})
+	return nil
+}
+
+func (f *fakeStore) Delete(_ context.Context, ownerKind, ownerID, photoID string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deleted = append(f.deleted, Record{OwnerKind: ownerKind, OwnerID: ownerID, ID: photoID})
 	return nil
 }
 
@@ -44,9 +54,15 @@ type stubUserAccess struct{ err error }
 
 func (s stubUserAccess) CanViewUserPhotos(context.Context, string, string) error { return s.err }
 
-type stubChatAccess struct{ err error }
+type stubChatAccess struct {
+	err       error
+	deleteErr error
+}
 
 func (s stubChatAccess) CanViewChatPhotos(context.Context, string, string) error { return s.err }
+func (s stubChatAccess) CanDeleteChatPhotos(context.Context, string, string) error {
+	return s.deleteErr
+}
 
 func newTestService(t *testing.T, store Store, user UserAccess, chat ChatAccess) *Service {
 	t.Helper()
@@ -161,5 +177,77 @@ func TestListPresignsNewestFirstAndSkipsBrokenRows(t *testing.T) {
 	}
 	if store.lastLimit != DefaultListLimit {
 		t.Fatalf("expected the default limit, got %d", store.lastLimit)
+	}
+}
+
+func TestDeleteOwnUserPhoto(t *testing.T) {
+	store := &fakeStore{}
+	svc := newTestService(t, store, stubUserAccess{}, stubChatAccess{})
+
+	if err := svc.Delete(context.Background(), "user-1", OwnerUser, "user-1", "photo-9"); err != nil {
+		t.Fatalf("Delete() failed: %v", err)
+	}
+	if len(store.deleted) != 1 {
+		t.Fatalf("expected 1 deleted row, got %d", len(store.deleted))
+	}
+	got := store.deleted[0]
+	if got.OwnerKind != OwnerUser || got.OwnerID != "user-1" || got.ID != "photo-9" {
+		t.Fatalf("unexpected deleted row: %+v", got)
+	}
+}
+
+func TestDeleteUserPhotoForbidsStrangers(t *testing.T) {
+	store := &fakeStore{}
+	svc := newTestService(t, store, stubUserAccess{}, stubChatAccess{})
+
+	if err := svc.Delete(context.Background(), "viewer-2", OwnerUser, "user-1", "photo-9"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+	if len(store.deleted) != 0 {
+		t.Fatal("forbidden delete must not reach the store")
+	}
+}
+
+func TestDeleteChatPhotoNeedsEditGate(t *testing.T) {
+	store := &fakeStore{}
+	allowed := newTestService(t, store, stubUserAccess{}, stubChatAccess{})
+	if err := allowed.Delete(context.Background(), "admin-1", OwnerChat, "chat-1", "photo-9"); err != nil {
+		t.Fatalf("Delete() failed: %v", err)
+	}
+	if len(store.deleted) != 1 || store.deleted[0].OwnerKind != OwnerChat {
+		t.Fatalf("unexpected deleted rows: %+v", store.deleted)
+	}
+
+	deniedStore := &fakeStore{}
+	denied := newTestService(t, deniedStore, stubUserAccess{}, stubChatAccess{deleteErr: ErrForbidden})
+	if err := denied.Delete(context.Background(), "member-1", OwnerChat, "chat-1", "photo-9"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+	if len(deniedStore.deleted) != 0 {
+		t.Fatal("forbidden delete must not reach the store")
+	}
+}
+
+func TestDeleteRejectsBadArguments(t *testing.T) {
+	svc := newTestService(t, &fakeStore{}, stubUserAccess{}, stubChatAccess{})
+
+	for _, args := range [][4]string{
+		{"", OwnerUser, "user-1", "photo-9"},
+		{"user-1", "group", "user-1", "photo-9"},
+		{"user-1", OwnerUser, "", "photo-9"},
+		{"user-1", OwnerUser, "user-1", ""},
+	} {
+		if err := svc.Delete(context.Background(), args[0], args[1], args[2], args[3]); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Delete(%q) = %v, want ErrNotFound", args, err)
+		}
+	}
+}
+
+func TestDeletePropagatesStoreNotFound(t *testing.T) {
+	store := &fakeStore{deleteErr: ErrNotFound}
+	svc := newTestService(t, store, stubUserAccess{}, stubChatAccess{})
+
+	if err := svc.Delete(context.Background(), "user-1", OwnerUser, "user-1", "gone"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }

@@ -20,6 +20,15 @@ func NewCallRepository(client *Client) *CallRepository {
 	return &CallRepository{client: client}
 }
 
+// Call history page bounds: the HTTP layer (limit<=200) and the calls
+// service (limit<=200) already clamp, this is defence in depth so the
+// make() below never allocates from an unbounded caller value (CodeQL
+// go/uncontrolled-allocation-size).
+const (
+	defaultRecentCallsLimit = 50
+	maxRecentCallsLimit     = 200
+)
+
 const callColumns = `id::text, chat_id::text, kind, topology, e2ee, started_by::text,
 	started_at, ended_at, end_reason, max_participants`
 
@@ -98,8 +107,11 @@ func (r *CallRepository) DeleteCall(ctx context.Context, chatID, callID string) 
 }
 
 func (r *CallRepository) ListRecentCalls(ctx context.Context, chatID string, limit int) ([]calls.CallRecord, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
+	if limit <= 0 {
+		limit = defaultRecentCallsLimit
+	}
+	if limit > maxRecentCallsLimit {
+		limit = maxRecentCallsLimit
 	}
 	const q = `
 		SELECT ` + callColumns + `

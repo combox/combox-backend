@@ -64,3 +64,26 @@ func (r *ProfilePhotoRepository) List(ctx context.Context, ownerKind, ownerID st
 	}
 	return out, nil
 }
+
+// Delete removes one archived row scoped to its owner. Zero affected rows
+// mean the photo is already gone (or never belonged to this owner).
+func (r *ProfilePhotoRepository) Delete(ctx context.Context, ownerKind, ownerID, photoID string) error {
+	const query = `
+		DELETE FROM profile_photos
+		WHERE owner_kind = $1 AND owner_id = $2::uuid AND id = $3::uuid
+	`
+	tag, err := r.client.pool.Exec(
+		ctx,
+		query,
+		strings.TrimSpace(ownerKind),
+		strings.TrimSpace(ownerID),
+		strings.TrimSpace(photoID),
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return profilephoto.ErrNotFound
+	}
+	return nil
+}

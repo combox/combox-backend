@@ -9,14 +9,15 @@ import (
 )
 
 // Vectors generated with python3 hashlib.scrypt (cross-implementation check
-// against x/crypto/scrypt, same N/r/p werkzeug uses by default):
+// against x/crypto/scrypt). Salts are raw ASCII like real werkzeug gen_salt
+// output (NOT hex) — see prod hashes, e.g. scrypt:32768:8:1$HKyVS63GwMcRAbg$…
 //
 //	python3 -c "import hashlib; ..."
 const (
-	werkzeugVectorHash     = "scrypt:32768:8:1$9f2c4a7e1b5d83f0a6c9e2d4b7f10536$99ffd14696d54c2dbdf9a57633621ee73978f1146350d62ae346e80ce78aac90"
+	werkzeugVectorHash     = "scrypt:1024:8:1$Ab3dEf7hIjKlMnOp$27a57e2c0ed5dde019fe59cf7d8bbc285a0a3d92e1b1d06dbec7c5d8fb9c1241"
 	werkzeugVectorPassword = "migr-Test-pass-42"
 
-	werkzeugVector64Hash     = "scrypt:16384:8:1$00112233445566778899aabbccddeeff$f3ed7ddd034f3e3c7d761dc332befd9860b14ae0d15093b5411241c520b31e98d80d817e39162b9a9e5812316dc65abb147c38750b55592cb2b2cd57d7fb6e4c"
+	werkzeugVector64Hash     = "scrypt:1024:8:1$Qr9sTuVwXyZ01234$0a4faf5f583ecfda34791f40350bf6cd0f32f1efb865e1e988dbcea726bacb21"
 	werkzeugVector64Password = "another!Pass99"
 )
 

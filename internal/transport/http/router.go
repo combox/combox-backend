@@ -73,6 +73,8 @@ type RouterDeps struct {
 	UserSettings UserSettingsService
 	// Blocked serves the "Blocked users" list of Privacy and Security.
 	Blocked BlockService
+	// Reports serves POST /api/private/v1/reports (the Report buttons).
+	Reports ReportService
 }
 
 type Translator interface {
@@ -155,6 +157,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 		// /chats/ subtree patterns, so registration order is irrelevant.
 		mux.HandleFunc("/api/private/v1/users/{userID}/photos", newUserPhotosHandler(deps.ProfilePhotos, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/chats/{chatID}/photos", newChatPhotosHandler(deps.ProfilePhotos, deps.I18n, deps.DefaultLocale))
+		// Single-row deletes: the two-segment collection patterns above and
+		// these three-segment item patterns never overlap in ServeMux.
+		mux.HandleFunc("/api/private/v1/users/{userID}/photos/{photoID}", newUserPhotoItemHandler(deps.ProfilePhotos, deps.I18n, deps.DefaultLocale))
+		mux.HandleFunc("/api/private/v1/chats/{chatID}/photos/{photoID}", newChatPhotoItemHandler(deps.ProfilePhotos, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.GIF != nil {
 		mux.HandleFunc("/api/private/v1/gifs/search", newGifsSearchHandler(deps.GIF, deps.I18n, deps.DefaultLocale))
@@ -182,6 +188,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 		// collide with the /profile/privacy subtree (different prefix).
 		mux.HandleFunc("/api/private/v1/profile/blocked", newBlockedListHandler(deps.Blocked, deps.I18n, deps.DefaultLocale))
 		mux.HandleFunc("/api/private/v1/profile/blocked/{userID}", newBlockedItemHandler(deps.Blocked, deps.I18n, deps.DefaultLocale))
+	}
+	if deps.Reports != nil {
+		mux.HandleFunc("/api/private/v1/reports", newReportsHandler(deps.Reports, deps.I18n, deps.DefaultLocale))
 	}
 	if deps.Media != nil {
 		mux.HandleFunc("/api/private/v1/media/attachments", newMediaAttachmentsHandler(deps.Media, deps.I18n, deps.DefaultLocale))

@@ -39,6 +39,13 @@ func (s *Service) ListInviteLinks(ctx context.Context, userID, chatID string) ([
 	if len(links) == 0 {
 		created, err := s.chats.CreateChatInviteLink(ctx, chatID, userID, "", true)
 		if err != nil {
+			// Concurrent GETs may both observe an empty list and race on
+			// the single-active-primary partial unique index
+			// (idx_chat_invite_links_primary_unique). The loser must not
+			// 500: re-read and serve the winner's row.
+			if retry, retryErr := s.chats.ListChatInviteLinks(ctx, chatID); retryErr == nil && len(retry) > 0 {
+				return retry, nil
+			}
 			return nil, internal(err)
 		}
 		links = []ChatInviteLink{created}

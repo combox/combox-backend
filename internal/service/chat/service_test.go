@@ -161,6 +161,9 @@ func (m *memChatRepo) CreateChat(_ context.Context, title string, memberIDs []st
 	case ChatKindGroup:
 		created.IsDirect = false
 		created.Kind = ChatKindGroup
+	case ChatKindSaved:
+		created.IsDirect = false
+		created.Kind = ChatKindSaved
 	default:
 		created.IsDirect = len(memberIDs) == 2
 		created.Kind = "group"
@@ -256,14 +259,33 @@ func (m *memChatRepo) CreateChannel(_ context.Context, parentChatID, title, chan
 	if m.roles == nil {
 		m.roles = map[string]map[string]string{}
 	}
+	// Mirror the postgres allocator: next topic = max(existing)+1, at least 2.
+	// This keeps the in-memory double faithful for voice/text regression tests.
+	maxTopic := 1
+	for _, c := range m.chats {
+		if c.Kind != "channel" || c.ParentChatID == nil || *c.ParentChatID != parentChatID {
+			continue
+		}
+		if c.TopicNumber != nil && *c.TopicNumber > maxTopic {
+			maxTopic = *c.TopicNumber
+		}
+	}
+	nextTopic := maxTopic + 1
+	if nextTopic < 2 {
+		nextTopic = 2
+	}
+	createdID := "channel-" + strconv.Itoa(len(m.chats)+1)
+	topicCopy := nextTopic
+	typeCopy := strings.ToLower(strings.TrimSpace(channelType))
 	created := Chat{
-		ID:              "channel-1",
+		ID:              createdID,
 		Title:           title,
 		IsDirect:        false,
 		Type:            ChatTypeStandard,
 		Kind:            "channel",
 		ParentChatID:    &parentChatID,
-		ChannelType:     &channelType,
+		ChannelType:     &typeCopy,
+		TopicNumber:     &topicCopy,
 		CommentsEnabled: true,
 		CreatedAt:       time.Now().UTC(),
 	}
@@ -1171,6 +1193,9 @@ func TestChatListActionsArePerViewer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list chats: %v", err)
 	}
+	// ListChats lazily ensures the Saved Messages self-chat; the flags below
+	// belong to chat-1, so the self-chat is filtered out of the assertion.
+	chats = withoutSavedChats(chats)
 	if len(chats) != 1 {
 		t.Fatalf("expected one chat, got %d", len(chats))
 	}
@@ -1221,15 +1246,16 @@ func TestDeleteDirectChatOnlyForCaller(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list chats for caller: %v", err)
 	}
-	if len(callerChats) != 0 {
-		t.Fatalf("expected no chats for caller, got %d", len(callerChats))
+	// The lazy Saved Messages self-chat is the caller's only remaining row.
+	if got := len(withoutSavedChats(callerChats)); got != 0 {
+		t.Fatalf("expected no chats for caller, got %d", got)
 	}
 	peerChats, err := svc.ListChats(ctx, "u2")
 	if err != nil {
 		t.Fatalf("list chats for peer: %v", err)
 	}
-	if len(peerChats) != 1 {
-		t.Fatalf("expected peer to keep one chat, got %d", len(peerChats))
+	if got := len(withoutSavedChats(peerChats)); got != 1 {
+		t.Fatalf("expected peer to keep one chat, got %d", got)
 	}
 
 	state, err := chatRepo.GetChatUserState(ctx, "u1", "chat-1")
@@ -1483,6 +1509,9 @@ func TestPinChatScopeIsPerCategory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list chats: %v", err)
 	}
+	// The lazy Saved Messages self-chat rides along in every list; the pin
+	// assertion targets chat-1 only.
+	chats = withoutSavedChats(chats)
 	if len(chats) != 1 || !chats[0].Pinned || chats[0].PinScope != "direct" || chats[0].PinOrder != 3 {
 		t.Fatalf("expected list to carry pin scope direct/3, got %+v", chats)
 	}
@@ -1550,7 +1579,9 @@ func TestDeleteSystemBotChat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list chats: %v", err)
 	}
-	if len(chats) != 0 {
+	// Only the lazy Saved Messages self-chat remains after the bot chat is
+	// removed for the caller.
+	if len(withoutSavedChats(chats)) != 0 {
 		t.Fatalf("expected bot chat to disappear from the list, got %d", len(chats))
 	}
 }
