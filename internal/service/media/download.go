@@ -48,7 +48,7 @@ func (s *Service) CreateDownloadURL(ctx context.Context, requesterUserID, attach
 		filename = "attachment"
 	}
 
-	if !(strings.EqualFold(a.Kind, "video") || strings.EqualFold(a.Kind, "audio")) || a.HLSMasterObjectKey == nil || strings.TrimSpace(*a.HLSMasterObjectKey) == "" {
+	if !strings.EqualFold(a.Kind, "video") || a.HLSMasterObjectKey == nil || strings.TrimSpace(*a.HLSMasterObjectKey) == "" {
 		url, presignErr := s.store.PresignGetObject(ctx, a.ObjectKey, downloadURLTTL)
 		if presignErr != nil {
 			return AttachmentDownloadOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: presignErr}

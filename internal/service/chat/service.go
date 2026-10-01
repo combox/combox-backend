@@ -46,6 +46,87 @@ func canReactPublicChannelByRole(role string) bool {
 	}
 }
 
+// canPostIntoChannel reports whether the viewer may write into a channel whose
+// "who can send messages" setting is restricted to admins.
+func (s *Service) canPostIntoChannel(ctx context.Context, target Chat, userID string) (bool, error) {
+	if NormalizeSendPermission(derefString(target.SendPermission)) != SendPermissionAdmins {
+		return true, nil
+	}
+	role, err := s.chats.GetChatMemberRole(ctx, target.ID, userID)
+	if err != nil {
+		return false, internal(err)
+	}
+	return canCreateChannelByRole(role), nil
+}
+
+// ensureCanPostIntoChat enforces the destination-side posting rules for an
+// incoming message. Forwarding used to skip these, so a subscriber could push
+// messages into an admin-only channel.
+func (s *Service) ensureCanPostIntoChat(ctx context.Context, target Chat, userID string) error {
+	chatID := strings.TrimSpace(target.ID)
+	chatKind := strings.TrimSpace(strings.ToLower(target.Kind))
+	switch {
+	case isStandaloneChannel(target):
+		if err := s.ensureChatMember(ctx, chatID, userID); err != nil {
+			return err
+		}
+		if banned, banErr := s.chats.IsPublicChannelBanned(ctx, chatID, userID); banErr != nil {
+			return internal(banErr)
+		} else if banned {
+			return forbidden("error.chat.forbidden")
+		}
+		if muted, muteErr := s.chats.IsPublicChannelMuted(ctx, chatID, userID); muteErr != nil {
+			return internal(muteErr)
+		} else if muted {
+			return forbidden("error.chat.forbidden")
+		}
+		role, roleErr := s.chats.GetChatMemberRole(ctx, chatID, userID)
+		if roleErr != nil {
+			return internal(roleErr)
+		}
+		if !canPostPublicChannelByRole(role) {
+			return forbidden("error.chat.forbidden")
+		}
+	case chatKind == "comment_thread":
+		parentID := ""
+		if target.ParentChatID != nil {
+			parentID = strings.TrimSpace(*target.ParentChatID)
+		}
+		if parentID == "" {
+			return forbidden("error.chat.forbidden")
+		}
+		if banned, banErr := s.chats.IsPublicChannelBanned(ctx, parentID, userID); banErr != nil {
+			return internal(banErr)
+		} else if banned {
+			return forbidden("error.chat.forbidden")
+		}
+		if muted, muteErr := s.chats.IsPublicChannelMuted(ctx, parentID, userID); muteErr != nil {
+			return internal(muteErr)
+		} else if muted {
+			return forbidden("error.chat.forbidden")
+		}
+		role, roleErr := s.chats.GetChatMemberRole(ctx, parentID, userID)
+		if roleErr != nil {
+			return internal(roleErr)
+		}
+		if !canPostPublicChannelByRole(role) {
+			return forbidden("error.chat.forbidden")
+		}
+	default:
+		if err := s.ensureChatMember(ctx, chatID, userID); err != nil {
+			return err
+		}
+		if chatKind == "channel" {
+			if allowed, permErr := s.canPostIntoChannel(ctx, target, userID); permErr != nil {
+				return permErr
+			} else if !allowed {
+				return forbidden("error.chat.forbidden")
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (Message, error) {
 	userID := strings.TrimSpace(input.UserID)
 	botID := strings.TrimSpace(input.BotID)
@@ -129,6 +210,13 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 		default:
 			if err := s.ensureChatMember(ctx, chatID, userID); err != nil {
 				return Message{}, err
+			}
+			if chatKind == "channel" {
+				if allowed, permErr := s.canPostIntoChannel(ctx, chatMeta, userID); permErr != nil {
+					return Message{}, permErr
+				} else if !allowed {
+					return Message{}, forbidden("error.chat.forbidden")
+				}
 			}
 		}
 	}
@@ -258,6 +346,7 @@ func (s *Service) CreateMessage(ctx context.Context, input CreateMessageInput) (
 					SenderUserID:    senderID,
 					RecipientUserID: memberID,
 					CreatedAt:       message.CreatedAt,
+					Preview:         messagePreviewHead(message.Content, 200),
 				}
 				_ = s.publisher.PublishUserMessageCreated(ctx, ev)
 				if s.notifications != nil && userID != "" && memberID != userID {
@@ -350,8 +439,28 @@ func (s *Service) ListMessages(ctx context.Context, input ListMessagesInput) (Me
 	if repoErr != nil {
 		return MessagePage{}, internal(repoErr)
 	}
+	// Per-user history clear: a member's own watermark hides everything at or
+	// before it from that member only; other members are untouched.
+	state, stateErr := s.chats.GetChatUserState(ctx, userID, chatID)
+	if stateErr != nil {
+		return MessagePage{}, internal(stateErr)
+	}
+	if state.HistoryClearedAt != nil {
+		watermark := *state.HistoryClearedAt
+		visible := page.Items[:0]
+		for _, item := range page.Items {
+			if item.CreatedAt.After(watermark) {
+				visible = append(visible, item)
+			}
+		}
+		page.Items = visible
+	}
 	for idx := range page.Items {
 		page.Items[idx] = sanitizeMessageReactionsForViewer(chatMeta, page.Items[idx])
+	}
+	s.applyForwardPrivacyToMessages(ctx, userID, page.Items)
+	if err := s.attachPollsToMessages(ctx, userID, page.Items); err != nil {
+		return MessagePage{}, err
 	}
 	if s.statusRepo != nil && len(page.Items) > 0 {
 		messageIDs := make([]string, 0, len(page.Items))

@@ -8,6 +8,13 @@ coverage/
 *.log
 *.out
 *.test
+# Locally built binaries (nix builds to /var/lib/combox instead).
+/combox-backend-bin
+/api
+/boxchat-migrate
+/migrate-logs*
+*.db
+*.db-journal
 
 .DS_Store
 Thumbs.db

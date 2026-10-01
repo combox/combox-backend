@@ -2,6 +2,7 @@ package minio
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/url"
 	"strconv"
@@ -71,6 +72,20 @@ func (c *Client) Bucket() string {
 		return ""
 	}
 	return c.bucket
+}
+
+func (c *Client) EnsureBucket(ctx context.Context) error {
+	if c == nil || c.c == nil {
+		return nil
+	}
+	exists, err := c.c.BucketExists(ctx, c.bucket)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	return c.c.MakeBucket(ctx, c.bucket, minio.MakeBucketOptions{Region: ""})
 }
 
 func (c *Client) NewMultipartUpload(ctx context.Context, objectKey, contentType string) (string, error) {
@@ -157,6 +172,28 @@ func (c *Client) DeleteObject(ctx context.Context, objectKey string) error {
 		return nil
 	}
 	return c.c.RemoveObject(ctx, c.bucket, strings.TrimSpace(objectKey), minio.RemoveObjectOptions{})
+}
+
+// CopyObject server-side copies srcKey to dstKey inside the same bucket,
+// preserving the source object metadata (content type included). Playlist
+// pins use it to give the saver an owned copy that survives deletion of the
+// source chat message. Unlike the other helpers it reports a missing client
+// as an error: silently skipping the copy would leave a DB row pointing at
+// a non-existent object.
+func (c *Client) CopyObject(ctx context.Context, srcKey, dstKey string) error {
+	if c == nil || c.c == nil {
+		return errors.New("minio client is not configured")
+	}
+	srcKey = strings.TrimSpace(srcKey)
+	dstKey = strings.TrimSpace(dstKey)
+	if srcKey == "" || dstKey == "" {
+		return errors.New("source and destination object keys are required")
+	}
+	_, err := c.c.CopyObject(ctx,
+		minio.CopyDestOptions{Bucket: c.bucket, Object: dstKey},
+		minio.CopySrcOptions{Bucket: c.bucket, Object: srcKey},
+	)
+	return err
 }
 
 func (c *Client) putOptions(contentType string) minio.PutObjectOptions {

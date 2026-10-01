@@ -54,12 +54,12 @@ func (a chatPublisherAdapter) PublishUserMessageCreated(ctx context.Context, ev 
 
 func (a chatPublisherAdapter) PublishMessageStatus(ctx context.Context, ev chatsvc.MessageStatusEvent) error {
 	return a.p.PublishMessageStatus(ctx, vkrepo.MessageStatusEvent{
-		MessageID: ev.MessageID,
-		ChatID:    ev.ChatID,
-		UserID:    ev.UserID,
-		DeviceID:  ev.DeviceID,
-		Status:    ev.Status,
-		At:        ev.At,
+		MessageID:       ev.MessageID,
+		ChatID:          ev.ChatID,
+		UserID:          ev.UserID,
+		RecipientUserID: ev.RecipientUserID,
+		Status:          ev.Status,
+		At:              ev.At,
 	})
 }
 
@@ -71,6 +71,45 @@ func (a chatPublisherAdapter) PublishMessageUpdated(ctx context.Context, ev chat
 		RecipientUserID: ev.RecipientUserID,
 		Content:         ev.Content,
 		EditedAt:        ev.EditedAt,
+	})
+}
+
+func (a chatPublisherAdapter) PublishMessageDeleted(ctx context.Context, ev chatsvc.MessageDeletedEvent) error {
+	return a.p.PublishMessageDeleted(ctx, vkrepo.MessageDeletedEvent{
+		MessageID:       ev.MessageID,
+		ChatID:          ev.ChatID,
+		ActorUserID:     ev.ActorUserID,
+		RecipientUserID: ev.RecipientUserID,
+		At:              ev.At,
+	})
+}
+
+func (a chatPublisherAdapter) PublishMessageReaction(ctx context.Context, ev chatsvc.MessageReactionEvent) error {
+	reactions := make([]vkrepo.MessageReaction, 0, len(ev.Reactions))
+	for _, reaction := range ev.Reactions {
+		reactions = append(reactions, vkrepo.MessageReaction{
+			Emoji:   reaction.Emoji,
+			UserIDs: reaction.UserIDs,
+		})
+	}
+	return a.p.PublishMessageReaction(ctx, vkrepo.MessageReactionEvent{
+		MessageID:       ev.MessageID,
+		ChatID:          ev.ChatID,
+		ActorUserID:     ev.ActorUserID,
+		RecipientUserID: ev.RecipientUserID,
+		Emoji:           ev.Emoji,
+		Action:          ev.Action,
+		Reactions:       reactions,
+		At:              ev.At,
+	})
+}
+
+func (a chatPublisherAdapter) PublishChatUpdated(ctx context.Context, ev chatsvc.ChatUpdatedEvent) error {
+	return a.p.PublishChatUpdated(ctx, vkrepo.ChatUpdatedEvent{
+		ChatID:          ev.ChatID,
+		RecipientUserID: ev.RecipientUserID,
+		Chat:            ev.Chat,
+		UpdatedAt:       ev.UpdatedAt,
 	})
 }
 

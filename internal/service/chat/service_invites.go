@@ -93,5 +93,6 @@ func (s *Service) LeaveChat(ctx context.Context, userID, chatID string) error {
 	if err := s.chats.RemoveChatMember(ctx, chatID, userID); err != nil {
 		return internal(err)
 	}
+	s.recordChatEvent(ctx, chatID, userID, userID, ChatEventMemberLeft, "")
 	return nil
 }

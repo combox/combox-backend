@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"combox-backend/internal/calls"
 	"combox-backend/internal/config"
 	"combox-backend/internal/i18n"
 	resendintegration "combox-backend/internal/integration/resend"
@@ -24,6 +25,7 @@ import (
 	pgrepo "combox-backend/internal/repository/postgres"
 	vkrepo "combox-backend/internal/repository/valkey"
 	authsvc "combox-backend/internal/service/auth"
+	blocksvc "combox-backend/internal/service/blocks"
 	botauthsvc "combox-backend/internal/service/botauth"
 	botwebhooksvc "combox-backend/internal/service/botwebhook"
 	chatsvc "combox-backend/internal/service/chat"
@@ -31,7 +33,11 @@ import (
 	emailcodesvc "combox-backend/internal/service/emailcode"
 	gifsvc "combox-backend/internal/service/gif"
 	mediasvc "combox-backend/internal/service/media"
+	privacysvc "combox-backend/internal/service/privacy"
+	profilephotosvc "combox-backend/internal/service/profilephoto"
 	searchsvc "combox-backend/internal/service/search"
+	settingssvc "combox-backend/internal/service/settings"
+	translatesvc "combox-backend/internal/service/translate"
 	httptransport "combox-backend/internal/transport/http"
 )
 
@@ -39,6 +45,147 @@ type chatPublisherAdapter struct {
 	p        *vkrepo.EventPublisher
 	settings *vkrepo.ProfileSettingsRepository
 	logger   *slog.Logger
+}
+
+// callMemberChecker lets the calls hub ask the chat service whether a user
+// belongs to a chat; only members may join or stay in its calls.
+type callMemberChecker struct {
+	chat *chatsvc.Service
+}
+
+func (c callMemberChecker) IsMember(ctx context.Context, userID, chatID string) (bool, error) {
+	if c.chat == nil {
+		return false, errors.New("chat service is not configured")
+	}
+	_, err := c.chat.GetChat(ctx, userID, chatID)
+	if err == nil {
+		return true, nil
+	}
+	var svcErr *chatsvc.Error
+	if errors.As(err, &svcErr) {
+		switch svcErr.Code {
+		case chatsvc.CodeForbidden, chatsvc.CodeNotFound:
+			return false, nil
+		}
+	}
+	return false, err
+}
+
+// CanPublishStream reports whether the user may start a channel live stream.
+// Channels reuse their moderation roles: only the owner/admin may publish,
+// everybody else may only watch. Outside of channels every member may publish.
+func (c callMemberChecker) CanPublishStream(ctx context.Context, userID, chatID string) (bool, error) {
+	if c.chat == nil {
+		return false, errors.New("chat service is not configured")
+	}
+	chat, err := c.chat.GetChat(ctx, userID, chatID)
+	if err != nil {
+		return false, err
+	}
+	if !isStandaloneChannelChat(chat) {
+		return true, nil
+	}
+	if role := strings.ToLower(strings.TrimSpace(derefString(chat.ViewerRole))); role != "" {
+		return role == "owner" || role == "admin", nil
+	}
+	// Private channels do not expose the viewer role on the chat payload; the
+	// member list is the remaining role source and is itself limited to the
+	// members that are allowed to see it (owner/admin on channels).
+	members, err := c.chat.ListMembers(ctx, userID, chatID, false)
+	if err != nil {
+		var svcErr *chatsvc.Error
+		if errors.As(err, &svcErr) && (svcErr.Code == chatsvc.CodeForbidden || svcErr.Code == chatsvc.CodeNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, member := range members {
+		if member.UserID != userID {
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(member.Role))
+		return role == "owner" || role == "admin", nil
+	}
+	return false, nil
+}
+
+func isStandaloneChannelChat(chat chatsvc.Chat) bool {
+	switch strings.ToLower(strings.TrimSpace(chat.Kind)) {
+	case "standalone_channel":
+		return true
+	case "channel":
+		parent := ""
+		if chat.ParentChatID != nil {
+			parent = strings.TrimSpace(*chat.ParentChatID)
+		}
+		return parent == ""
+	default:
+		return false
+	}
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+// callNotifier pushes call lifecycle events onto the realtime channel so chat
+// members that are not in the signaling session yet can ring / dismiss.
+type callNotifier struct {
+	chat   *chatsvc.Service
+	pub    *vkrepo.EventPublisher
+	logger *slog.Logger
+}
+
+func (n callNotifier) CallStarted(ctx context.Context, call calls.CallRecord) {
+	n.broadcast(ctx, call, nil)
+}
+
+func (n callNotifier) CallEnded(ctx context.Context, call calls.CallRecord, reason string) {
+	n.broadcast(ctx, call, &reason)
+}
+
+func (n callNotifier) broadcast(ctx context.Context, call calls.CallRecord, reason *string) {
+	if n.chat == nil || n.pub == nil {
+		return
+	}
+	members, err := n.chat.ListMembers(ctx, call.StartedBy, call.ChatID, false)
+	if err != nil {
+		n.logger.Error("calls: list members for call notification",
+			slog.String("call_id", call.ID),
+			slog.String("chat_id", call.ChatID),
+			slog.String("error", err.Error()))
+		return
+	}
+	for _, member := range members {
+		if member.UserID == "" || member.UserID == call.StartedBy {
+			continue
+		}
+		ev := vkrepo.CallEvent{
+			UserID:    member.UserID,
+			CallID:    call.ID,
+			ChatID:    call.ChatID,
+			Kind:      string(call.Kind),
+			E2EE:      call.E2EE,
+			StartedBy: call.StartedBy,
+			StartedAt: call.StartedAt,
+		}
+		var pubErr error
+		if reason == nil {
+			pubErr = n.pub.PublishCallStarted(ctx, ev)
+		} else {
+			ev.Reason = *reason
+			pubErr = n.pub.PublishCallEnded(ctx, ev)
+		}
+		if pubErr != nil {
+			n.logger.Error("calls: publish call notification",
+				slog.String("call_id", call.ID),
+				slog.String("user_id", member.UserID),
+				slog.String("error", pubErr.Error()))
+		}
+	}
 }
 
 func (a chatPublisherAdapter) PublishDeviceMessageCreated(ctx context.Context, ev chatsvc.DeviceMessageCreatedEvent) error {
@@ -77,6 +224,7 @@ func (a chatPublisherAdapter) PublishUserMessageCreated(ctx context.Context, ev 
 		SenderUserID:    ev.SenderUserID,
 		RecipientUserID: ev.RecipientUserID,
 		CreatedAt:       ev.CreatedAt,
+		Preview:         ev.Preview,
 	})
 	// We always publish notification events, but mark muted chats so clients can suppress
 	// sound/desktop notifications while still showing unread counters.
@@ -87,10 +235,15 @@ func (a chatPublisherAdapter) PublishUserMessageCreated(ctx context.Context, ev 
 		}
 	}
 	_ = a.p.PublishNotification(ctx, vkrepo.NotificationEvent{
-		UserID:    ev.RecipientUserID,
-		Kind:      "message.created",
-		Muted:     muted,
-		Payload:   map[string]string{"chat_id": ev.ChatID, "message_id": ev.MessageID, "sender_user_id": ev.SenderUserID},
+		UserID: ev.RecipientUserID,
+		Kind:   "message.created",
+		Muted:  muted,
+		Payload: map[string]string{
+			"chat_id":        ev.ChatID,
+			"message_id":     ev.MessageID,
+			"sender_user_id": ev.SenderUserID,
+			"preview":        ev.Preview,
+		},
 		CreatedAt: ev.CreatedAt,
 	})
 	if err != nil && a.logger != nil {
@@ -204,6 +357,182 @@ func (a chatPublisherAdapter) PublishMessageReaction(ctx context.Context, ev cha
 	return err
 }
 
+func (a chatPublisherAdapter) PublishChatUpdated(ctx context.Context, ev chatsvc.ChatUpdatedEvent) error {
+	if a.p == nil {
+		return errors.New("valkey event publisher is nil")
+	}
+	err := a.p.PublishChatUpdated(ctx, vkrepo.ChatUpdatedEvent{
+		ChatID:          ev.ChatID,
+		RecipientUserID: ev.RecipientUserID,
+		Chat:            ev.Chat,
+		UpdatedAt:       ev.UpdatedAt,
+	})
+	if err != nil && a.logger != nil {
+		a.logger.Error("publish ws event failed",
+			slog.String("event", "chat.updated"),
+			slog.String("chat_id", ev.ChatID),
+			slog.String("recipient_user_id", ev.RecipientUserID),
+			slog.String("error", err.Error()))
+	}
+	return err
+}
+
+type profilePublisherAdapter struct {
+	p      *vkrepo.EventPublisher
+	logger *slog.Logger
+}
+
+func (a profilePublisherAdapter) PublishProfileUpdate(ctx context.Context, ev authsvc.ProfileUpdatedEvent) error {
+	if a.p == nil {
+		return errors.New("valkey event publisher is nil")
+	}
+	err := a.p.PublishProfileUpdate(ctx, vkrepo.ProfileUpdateEvent{
+		UserID:          ev.UserID,
+		RecipientUserID: ev.RecipientUserID,
+		ID:              ev.UserID,
+		Email:           ev.Email,
+		Username:        ev.Username,
+		FirstName:       ev.FirstName,
+		LastName:        ev.LastName,
+		BirthDate:       ev.BirthDate,
+		AvatarDataURL:   ev.AvatarDataURL,
+		AvatarGradient:  ev.AvatarGradient,
+	})
+	if err != nil && a.logger != nil {
+		a.logger.Error("publish ws event failed",
+			slog.String("event", "profile.update"),
+			slog.String("user_id", ev.UserID),
+			slog.String("recipient_user_id", ev.RecipientUserID),
+			slog.String("error", err.Error()))
+	}
+	return err
+}
+
+// profilePhotoUserAccess gates a user's photo history on the owner's
+// profile_photos privacy rule: the owner always sees their own, everybody
+// else needs Evaluate(viewer, owner, "profile_photos") to allow them.
+type profilePhotoUserAccess struct {
+	auth    *authsvc.Service
+	privacy *privacysvc.Service
+}
+
+func (a profilePhotoUserAccess) CanViewUserPhotos(ctx context.Context, viewerID, ownerID string) error {
+	viewerID = strings.TrimSpace(viewerID)
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" {
+		return profilephotosvc.ErrNotFound
+	}
+	if viewerID == ownerID {
+		return nil
+	}
+	if a.auth == nil {
+		return profilephotosvc.ErrForbidden
+	}
+	if _, err := a.auth.GetProfile(ctx, ownerID); err != nil {
+		var svcErr *authsvc.Error
+		if errors.As(err, &svcErr) && (svcErr.Code == authsvc.CodeUnauthorized || svcErr.Code == authsvc.CodeInvalidArgument) {
+			// Nobody's business that a missing account ever existed.
+			return profilephotosvc.ErrNotFound
+		}
+		return err
+	}
+	if a.privacy == nil {
+		return nil
+	}
+	allowed, err := a.privacy.Evaluate(ctx, viewerID, ownerID, privacysvc.ParamProfilePhotos)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return profilephotosvc.ErrForbidden
+	}
+	return nil
+}
+
+// forwardOriginProfiles resolves the origin user's avatar for the forward
+// card. GetProfile already presigns the avatar object key, so the chat
+// service gets a ready to use data URL.
+type forwardOriginProfiles struct {
+	auth *authsvc.Service
+}
+
+func (a forwardOriginProfiles) GetAvatarDataURL(ctx context.Context, userID string) (*string, error) {
+	if a.auth == nil {
+		return nil, errors.New("auth service is not configured")
+	}
+	user, err := a.auth.GetProfile(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return user.AvatarDataURL, nil
+}
+
+// profilePhotoChatAccess reuses GetChat, which already runs ensureChatMember:
+// only chat members (or, for a public channel, whoever may open it) see the
+// chat's photo history.
+type profilePhotoChatAccess struct {
+	chat *chatsvc.Service
+}
+
+func (a profilePhotoChatAccess) CanViewChatPhotos(ctx context.Context, viewerID, chatID string) error {
+	if a.chat == nil {
+		return profilephotosvc.ErrForbidden
+	}
+	if strings.TrimSpace(viewerID) == "" || strings.TrimSpace(chatID) == "" {
+		return profilephotosvc.ErrNotFound
+	}
+	if _, err := a.chat.GetChat(ctx, viewerID, chatID); err != nil {
+		var svcErr *chatsvc.Error
+		if errors.As(err, &svcErr) {
+			switch svcErr.Code {
+			case chatsvc.CodeNotFound:
+				return profilephotosvc.ErrNotFound
+			case chatsvc.CodeForbidden:
+				return profilephotosvc.ErrForbidden
+			}
+		}
+		return err
+	}
+	return nil
+}
+
+type sharedChatAudience struct {
+	chats chatsvc.ChatRepository
+}
+
+// ListSharedChatMemberIDs returns every distinct user sharing at least one
+// chat with userID, excluding userID itself. Ordering is not guaranteed.
+func (a sharedChatAudience) ListSharedChatMemberIDs(ctx context.Context, userID string) ([]string, error) {
+	cleanUserID := strings.TrimSpace(userID)
+	if a.chats == nil || cleanUserID == "" {
+		return nil, nil
+	}
+	chats, err := a.chats.ListChatsByUser(ctx, cleanUserID)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	memberIDs := make([]string, 0, 16)
+	for _, chat := range chats {
+		chatMemberIDs, listErr := a.chats.ListChatMemberIDs(ctx, chat.ID)
+		if listErr != nil {
+			return nil, listErr
+		}
+		for _, memberID := range chatMemberIDs {
+			memberID = strings.TrimSpace(memberID)
+			if memberID == "" || memberID == cleanUserID {
+				continue
+			}
+			if _, exists := seen[memberID]; exists {
+				continue
+			}
+			seen[memberID] = struct{}{}
+			memberIDs = append(memberIDs, memberID)
+		}
+	}
+	return memberIDs, nil
+}
+
 type mediaStoreAdapter struct{ c *miniorepo.Client }
 
 func (a mediaStoreAdapter) Bucket() string {
@@ -240,6 +569,10 @@ func (a mediaStoreAdapter) PutObject(ctx context.Context, objectKey, contentType
 
 func (a mediaStoreAdapter) DeleteObject(ctx context.Context, objectKey string) error {
 	return a.c.DeleteObject(ctx, objectKey)
+}
+
+func (a mediaStoreAdapter) CopyObject(ctx context.Context, srcKey, dstKey string) error {
+	return a.c.CopyObject(ctx, srcKey, dstKey)
 }
 
 type chatInviteStoreAdapter struct {
@@ -324,6 +657,13 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("init minio: %w", err)
 	}
+	{
+		ensureCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := minioClient.EnsureBucket(ensureCtx); err != nil {
+			return fmt.Errorf("ensure minio bucket: %w", err)
+		}
+	}
 
 	authService, err := authsvc.New(authsvc.Config{
 		Users:         pgrepo.NewAuthUserRepository(postgresClient),
@@ -340,12 +680,21 @@ func Run(ctx context.Context) error {
 
 	chatRepo := pgrepo.NewChatRepository(postgresClient)
 	msgRepo := pgrepo.NewMessageRepository(postgresClient)
+	pollRepo := pgrepo.NewPollRepository(postgresClient)
+	chatEventRepo := pgrepo.NewChatEventRepository(postgresClient)
 	publisher := vkrepo.NewEventPublisher(valkeyClient)
 	statusRepo := vkrepo.NewMessageStatusRepository(valkeyClient)
 	presenceRepo := vkrepo.NewPresenceRepository(valkeyClient)
 	profileRepo := vkrepo.NewProfileSettingsRepository(valkeyClient)
 	emailChangeRepo := vkrepo.NewEmailChangeRepository(valkeyClient)
+	legacyBindRepo := vkrepo.NewLegacyBindRepository(valkeyClient)
 	chatInviteRepo := vkrepo.NewChatInviteRepository(valkeyClient)
+
+	privacyRepo := pgrepo.NewPrivacyRepository(postgresClient)
+	privacySvc, err := privacysvc.New(privacyRepo)
+	if err != nil {
+		return fmt.Errorf("init privacy service: %w", err)
+	}
 
 	chatPublisher := &chatPublisherAdapter{p: publisher, settings: profileRepo, logger: logger}
 	chatSvc, err := chatsvc.NewWithPublisherAndStatusRepo(chatRepo, msgRepo, chatPublisher, statusRepo)
@@ -353,9 +702,46 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("init chat service: %w", err)
 	}
 	chatSvc.SetAvatarStore(minioClient, 0)
+	chatSvc.SetPollRepository(pollRepo)
+	chatSvc.SetChatEventRepository(chatEventRepo)
 	chatSvc.SetNotificationRepository(profileRepo)
 	chatSvc.SetInviteRepository(chatInviteStoreAdapter{r: chatInviteRepo}, 0)
 	chatSvc.SetPublicAppBaseURL(os.Getenv("PUBLIC_APP_BASE_URL"))
+	// Message serialisation enforces the origin owner's forwarded_messages
+	// rule and attaches the forward card avatar when the origin is visible.
+	chatSvc.SetForwardPrivacy(privacySvc)
+	chatSvc.SetForwardOriginProfiles(forwardOriginProfiles{auth: authService})
+
+	// Dialog filter folders ("Folders" in the settings) and the global app
+	// toggles of "Notifications and Sounds" / "Data and Storage".
+	chatSvc.SetChatFolderRepository(pgrepo.NewChatFolderRepository(postgresClient))
+	chatSvc.SetChatFolderInviteRepository(pgrepo.NewChatFolderRepository(postgresClient))
+	userSettingsSvc, err := settingssvc.New(pgrepo.NewUserSettingsRepository(postgresClient))
+	if err != nil {
+		return fmt.Errorf("init user settings service: %w", err)
+	}
+
+	// Blocked users ("Privacy and Security -> Blocked users", 000046).
+	blockedSvc, err := blocksvc.New(pgrepo.NewBlockedUsersRepository(postgresClient))
+	if err != nil {
+		return fmt.Errorf("init blocked users service: %w", err)
+	}
+
+	authService.SetProfileEventPublisher(profilePublisherAdapter{p: publisher, logger: logger})
+	authService.SetProfileAudienceResolver(sharedChatAudience{chats: chatRepo})
+
+	profilePhotoRepo := pgrepo.NewProfilePhotoRepository(postgresClient)
+	profilePhotoSvc, err := profilephotosvc.New(profilephotosvc.Config{
+		Store:      profilePhotoRepo,
+		Avatars:    minioClient,
+		UserAccess: profilePhotoUserAccess{auth: authService, privacy: privacySvc},
+		ChatAccess: profilePhotoChatAccess{chat: chatSvc},
+	})
+	if err != nil {
+		return fmt.Errorf("init profile photo service: %w", err)
+	}
+	authService.SetProfilePhotoRecorder(profilePhotoSvc)
+	chatSvc.SetProfilePhotoRecorder(profilePhotoSvc)
 
 	e2eService, err := e2esvc.New(pgrepo.NewE2ERepository(postgresClient))
 	if err != nil {
@@ -376,6 +762,46 @@ func Run(ctx context.Context) error {
 		gifService = nil
 	}
 
+	// R19 auto-translate engine. Empty TRANSLATE_ENGINE_URL selects the
+	// MyMemory free endpoint (no key); a LibreTranslate-compatible base URL
+	// enables server-side auto-detect of the source language. Translations
+	// are cached in Valkey (memory fallback lives inside the service).
+	translateService, err := translatesvc.New(translatesvc.Config{
+		EngineURL:       cfg.Translate.EngineURL,
+		APIKey:          cfg.Translate.APIKey,
+		MyMemoryEmail:   cfg.Translate.MyMemoryEmail,
+		Timeout:         cfg.Translate.Timeout,
+		CacheTTL:        cfg.Translate.CacheTTL,
+		RateLimitPerMin: cfg.Translate.RateLimitPerMin,
+		Cache:           translatesvc.NewValkeyCache(valkeyClient.Client()),
+	})
+	if err != nil {
+		return fmt.Errorf("init translate service: %w", err)
+	}
+	logger.Info("translate engine ready", slog.String("provider", translateService.ProviderName()))
+
+	var callsService *calls.Service
+	{
+		buildErr := error(nil)
+		callsService, buildErr = calls.New(calls.Config{
+			Enabled:           cfg.Calls.Enabled,
+			STUNURLs:          cfg.Calls.STUNURLs,
+			TURNURLs:          cfg.Calls.TURNURLs,
+			TURNSharedSecret:  cfg.Calls.TURNSharedSecret,
+			TURNCredentialTTL: cfg.Calls.TURNCredentialTTL,
+			MeshLimit:         cfg.Calls.MeshLimit,
+			MaxParticipants:   cfg.Calls.MaxParticipants,
+			ICEPortMin:        uint16(cfg.Calls.ICEPortMin),
+			ICEPortMax:        uint16(cfg.Calls.ICEPortMax),
+			AllowLoopback:     cfg.Calls.AllowLoopback,
+			Logger:            logger,
+		}, pgrepo.NewCallRepository(postgresClient), callMemberChecker{chat: chatSvc})
+		if buildErr != nil {
+			return fmt.Errorf("init calls service: %w", buildErr)
+		}
+		callsService.SetNotifier(callNotifier{chat: chatSvc, pub: publisher, logger: logger})
+	}
+
 	botTokenRepo := pgrepo.NewBotTokenRepository(postgresClient)
 	botAuthService, err := botauthsvc.New(botTokenRepo, cfg.Bot.TokenPepper)
 	if err != nil {
@@ -384,6 +810,7 @@ func Run(ctx context.Context) error {
 	botWebhookService := botwebhooksvc.New()
 
 	var emailCodeService *emailcodesvc.Service
+	var legacyMail emailcodesvc.Sender
 	if cfg.Auth.EmailVerify.Enabled {
 		resendSender, err := resendintegration.New(resendintegration.Config{
 			APIKey:  cfg.Auth.EmailVerify.ResendAPIKey,
@@ -393,6 +820,10 @@ func Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("init resend sender: %w", err)
 		}
+		// The same Resend mailer doubles as the sender for the boxchat
+		// legacy email-binding OTPs; nil (verify disabled) means the
+		// bind handler runs in dev-log mode.
+		legacyMail = resendSender
 
 		emailCodeService, err = emailcodesvc.New(emailcodesvc.Config{
 			Sender:      resendSender,
@@ -424,9 +855,13 @@ func Run(ctx context.Context) error {
 		EmailCode:      emailCodeAPI,
 		Chat:           chatSvc,
 		Search:         searchService,
+		Translate:      translateService,
+		Privacy:        privacySvc,
+		ProfilePhotos:  profilePhotoSvc,
 		GIF:            gifService,
 		Media:          mediaService,
 		E2E:            e2eService,
+		Calls:          callsService,
 		BotAuth:        botAuthService,
 		BotTokens:      botAuthService,
 		BotWebhooks:    botWebhookService,
@@ -434,6 +869,13 @@ func Run(ctx context.Context) error {
 		ProfileRepo:    profileRepo,
 		EmailChange:    emailChangeRepo,
 		EmailChangeTTL: cfg.Auth.EmailVerify.CodeTTL,
+		// Boxchat legacy binding: OTP store + shared Resend mailer (nil when
+		// email verification is disabled -> dev-log mode in the handler).
+		LegacyBind:       legacyBindRepo,
+		LegacyTTL:        cfg.Auth.EmailVerify.CodeTTL,
+		LegacyMailSender: legacyMail,
+		UserSettings:     userSettingsSvc,
+		Blocked:          blockedSvc,
 	})
 
 	httpServer := &http.Server{
@@ -498,6 +940,10 @@ func Run(ctx context.Context) error {
 
 	if err := httpServer.Shutdown(gracefulCtx); err != nil {
 		return fmt.Errorf("http server shutdown: %w", err)
+	}
+
+	if callsService != nil {
+		callsService.Close(gracefulCtx)
 	}
 
 	logger.Info("combox-backend stopped", slog.Duration("shutdown_timeout", cfg.App.ShutdownTimeout), slog.Time("stopped_at", time.Now().UTC()))

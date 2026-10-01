@@ -97,7 +97,7 @@ func (r *MediaRepository) GetAttachment(ctx context.Context, id string) (media.A
 			size_bytes, width, height, duration_ms,
 			bucket, object_key, upload_type, upload_id,
 			processing_status, processing_error, preview_object_key, hls_master_object_key, processed_at,
-			created_at, updated_at
+			created_at, updated_at, user_meta
 		FROM attachments
 		WHERE id = $1::uuid
 		LIMIT 1
@@ -128,6 +128,7 @@ func (r *MediaRepository) GetAttachment(ctx context.Context, id string) (media.A
 		&out.ProcessedAt,
 		&out.CreatedAt,
 		&out.UpdatedAt,
+		&out.UserMeta,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return media.Attachment{}, media.ErrAttachmentNotFound
@@ -135,6 +136,25 @@ func (r *MediaRepository) GetAttachment(ctx context.Context, id string) (media.A
 		return media.Attachment{}, err
 	}
 	return out, nil
+}
+
+// SetAttachmentUserMeta stores client supplied metadata (waveform, round flag)
+// on an attachment owned by the given user.
+func (r *MediaRepository) SetAttachmentUserMeta(ctx context.Context, userID, attachmentID string, meta map[string]any) error {
+	const q = `
+		UPDATE attachments
+		SET user_meta = $3::jsonb, updated_at = NOW()
+		WHERE id = $1::uuid AND user_id = $2::uuid`
+	tag, err := r.client.pool.Exec(ctx, q,
+		strings.TrimSpace(attachmentID), strings.TrimSpace(userID), meta,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return media.ErrAttachmentNotFound
+	}
+	return nil
 }
 
 func (r *MediaRepository) ListAttachmentsMissingMeta(ctx context.Context, limit int) ([]media.Attachment, error) {

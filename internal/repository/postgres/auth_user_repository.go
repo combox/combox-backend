@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,15 +21,54 @@ func NewAuthUserRepository(client *Client) *AuthUserRepository {
 	return &AuthUserRepository{client: client}
 }
 
+const userProfileSelect = `id::text, email, username, password_hash, is_legacy_unverified, legacy_username, COALESCE(first_name, ''), last_name, birth_date::text, avatar_data_url, avatar_gradient, COALESCE(bio, ''), phone_number, COALESCE(name_color, ''), COALESCE(playlist_title, ''), COALESCE(playlist_is_public, TRUE), COALESCE(saved_tracks, '[]'::jsonb), session_idle_ttl_seconds`
+
+func scanUserRow(row pgx.Row) (authsvc.User, error) {
+	var user authsvc.User
+	var tracksRaw []byte
+	err := row.Scan(
+		&user.ID,
+		&user.Email,
+		&user.Username,
+		&user.PasswordHash,
+		&user.IsLegacyUnverified,
+		&user.LegacyUsername,
+		&user.FirstName,
+		&user.LastName,
+		&user.BirthDate,
+		&user.AvatarDataURL,
+		&user.AvatarGradient,
+		&user.Bio,
+		&user.PhoneNumber,
+		&user.NameColor,
+		&user.PlaylistTitle,
+		&user.PlaylistIsPublic,
+		&tracksRaw,
+		&user.SessionIdleTTLSeconds,
+	)
+	if err != nil {
+		return authsvc.User{}, err
+	}
+	if len(tracksRaw) > 0 {
+		_ = json.Unmarshal(tracksRaw, &user.SavedTracks)
+	}
+	if user.SavedTracks == nil {
+		user.SavedTracks = []authsvc.SavedTrack{}
+	}
+	return user, nil
+}
+
 func (r *AuthUserRepository) Create(ctx context.Context, input authsvc.CreateUserInput) (authsvc.User, error) {
 	const query = `
 		INSERT INTO users (email, username, password_hash, first_name, last_name, birth_date, avatar_data_url, avatar_gradient)
 		VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8)
-		RETURNING id::text, email, username, password_hash, COALESCE(first_name, ''), last_name, birth_date::text, avatar_data_url, avatar_gradient, session_idle_ttl_seconds
+		RETURNING ` + userProfileSelect + `
 	`
 
+	var err error
 	var user authsvc.User
-	err := r.client.pool.QueryRow(
+	var tracksRaw []byte
+	err = r.client.pool.QueryRow(
 		ctx,
 		query,
 		input.Email,
@@ -44,13 +84,27 @@ func (r *AuthUserRepository) Create(ctx context.Context, input authsvc.CreateUse
 		&user.Email,
 		&user.Username,
 		&user.PasswordHash,
+		&user.IsLegacyUnverified,
+		&user.LegacyUsername,
 		&user.FirstName,
 		&user.LastName,
 		&user.BirthDate,
 		&user.AvatarDataURL,
 		&user.AvatarGradient,
+		&user.Bio,
+		&user.PhoneNumber,
+		&user.NameColor,
+		&user.PlaylistTitle,
+		&user.PlaylistIsPublic,
+		&tracksRaw,
 		&user.SessionIdleTTLSeconds,
 	)
+	if len(tracksRaw) > 0 {
+		_ = json.Unmarshal(tracksRaw, &user.SavedTracks)
+	}
+	if user.SavedTracks == nil {
+		user.SavedTracks = []authsvc.SavedTrack{}
+	}
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -69,15 +123,13 @@ func (r *AuthUserRepository) Create(ctx context.Context, input authsvc.CreateUse
 
 func (r *AuthUserRepository) FindByID(ctx context.Context, userID string) (authsvc.User, error) {
 	const query = `
-		SELECT id::text, email, username, password_hash, COALESCE(first_name, ''), last_name, birth_date::text, avatar_data_url, avatar_gradient, session_idle_ttl_seconds
+		SELECT ` + userProfileSelect + `
 		FROM users
 		WHERE id = $1::uuid
 		LIMIT 1
 	`
 
-	var user authsvc.User
-	err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(userID)).
-		Scan(&user.ID, &user.Email, &user.Username, &user.PasswordHash, &user.FirstName, &user.LastName, &user.BirthDate, &user.AvatarDataURL, &user.AvatarGradient, &user.SessionIdleTTLSeconds)
+	user, err := scanUserRow(r.client.pool.QueryRow(ctx, query, strings.TrimSpace(userID)))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return authsvc.User{}, authsvc.ErrUserNotFound
@@ -89,15 +141,13 @@ func (r *AuthUserRepository) FindByID(ctx context.Context, userID string) (auths
 
 func (r *AuthUserRepository) FindByLogin(ctx context.Context, login string) (authsvc.User, error) {
 	const query = `
-		SELECT id::text, email, username, password_hash, COALESCE(first_name, ''), last_name, birth_date::text, avatar_data_url, avatar_gradient, session_idle_ttl_seconds
+		SELECT ` + userProfileSelect + `
 		FROM users
 		WHERE email = $1 OR username = $1
 		LIMIT 1
 	`
 
-	var user authsvc.User
-	err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(strings.ToLower(login))).
-		Scan(&user.ID, &user.Email, &user.Username, &user.PasswordHash, &user.FirstName, &user.LastName, &user.BirthDate, &user.AvatarDataURL, &user.AvatarGradient, &user.SessionIdleTTLSeconds)
+	user, err := scanUserRow(r.client.pool.QueryRow(ctx, query, strings.TrimSpace(strings.ToLower(login))))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return authsvc.User{}, authsvc.ErrUserNotFound
@@ -180,6 +230,37 @@ func (r *AuthUserRepository) UpdateProfile(ctx context.Context, input authsvc.Up
 		args = append(args, input.AvatarGradient.Value)
 		arg++
 	}
+	if input.Bio.Set {
+		setClauses = append(setClauses, fmt.Sprintf("bio = $%d::text", arg))
+		args = append(args, input.Bio.Value)
+		arg++
+	}
+	if input.PhoneNumber.Set {
+		setClauses = append(setClauses, fmt.Sprintf("phone_number = $%d::text", arg))
+		args = append(args, input.PhoneNumber.Value)
+		arg++
+	}
+	if input.NameColor.Set {
+		setClauses = append(setClauses, fmt.Sprintf("name_color = $%d::text", arg))
+		args = append(args, input.NameColor.Value)
+		arg++
+	}
+	if input.SavedTracks.Set {
+		setClauses = append(setClauses, fmt.Sprintf("saved_tracks = $%d::jsonb", arg))
+		raw, _ := json.Marshal(input.SavedTracks.Value)
+		args = append(args, string(raw))
+		arg++
+	}
+	if input.PlaylistTitle.Set {
+		setClauses = append(setClauses, fmt.Sprintf("playlist_title = $%d::text", arg))
+		args = append(args, input.PlaylistTitle.Value)
+		arg++
+	}
+	if input.PlaylistIsPublic.Set {
+		setClauses = append(setClauses, fmt.Sprintf("playlist_is_public = $%d::boolean", arg))
+		args = append(args, input.PlaylistIsPublic.Value)
+		arg++
+	}
 
 	if len(setClauses) == 0 {
 		return authsvc.User{}, authsvc.ErrUserNotFound
@@ -189,23 +270,11 @@ func (r *AuthUserRepository) UpdateProfile(ctx context.Context, input authsvc.Up
 		UPDATE users
 		SET %s, updated_at = NOW()
 		WHERE id = $%d::uuid
-		RETURNING id::text, email, username, password_hash, COALESCE(first_name, ''), last_name, birth_date::text, avatar_data_url, avatar_gradient, session_idle_ttl_seconds
+		RETURNING `+userProfileSelect+`
 	`, strings.Join(setClauses, ", "), arg)
 	args = append(args, strings.TrimSpace(input.UserID))
 
-	var user authsvc.User
-	err := r.client.pool.QueryRow(ctx, query, args...).Scan(
-		&user.ID,
-		&user.Email,
-		&user.Username,
-		&user.PasswordHash,
-		&user.FirstName,
-		&user.LastName,
-		&user.BirthDate,
-		&user.AvatarDataURL,
-		&user.AvatarGradient,
-		&user.SessionIdleTTLSeconds,
-	)
+	user, err := scanUserRow(r.client.pool.QueryRow(ctx, query, args...))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return authsvc.User{}, authsvc.ErrUserNotFound
@@ -227,22 +296,10 @@ func (r *AuthUserRepository) UpdateEmail(ctx context.Context, userID, email stri
 		UPDATE users
 		SET email = $2, updated_at = NOW()
 		WHERE id = $1::uuid
-		RETURNING id::text, email, username, password_hash, COALESCE(first_name, ''), last_name, birth_date::text, avatar_data_url, avatar_gradient, session_idle_ttl_seconds
+		RETURNING ` + userProfileSelect + `
 	`
 
-	var user authsvc.User
-	err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(userID), strings.TrimSpace(strings.ToLower(email))).Scan(
-		&user.ID,
-		&user.Email,
-		&user.Username,
-		&user.PasswordHash,
-		&user.FirstName,
-		&user.LastName,
-		&user.BirthDate,
-		&user.AvatarDataURL,
-		&user.AvatarGradient,
-		&user.SessionIdleTTLSeconds,
-	)
+	user, err := scanUserRow(r.client.pool.QueryRow(ctx, query, strings.TrimSpace(userID), strings.TrimSpace(strings.ToLower(email))))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return authsvc.User{}, authsvc.ErrUserNotFound
@@ -252,6 +309,31 @@ func (r *AuthUserRepository) UpdateEmail(ctx context.Context, userID, email stri
 			if strings.Contains(pgErr.ConstraintName, "email") {
 				return authsvc.User{}, authsvc.ErrEmailTaken
 			}
+			return authsvc.User{}, authsvc.ErrEmailTaken
+		}
+		return authsvc.User{}, err
+	}
+	return user, nil
+}
+
+// BindLegacyEmail stores the real email of a migrated user and clears
+// is_legacy_unverified. legacy_username is deliberately left untouched for
+// audit. Callers must have verified the OTP before invoking this.
+func (r *AuthUserRepository) BindLegacyEmail(ctx context.Context, userID, email string) (authsvc.User, error) {
+	const query = `
+		UPDATE users
+		SET email = $2, is_legacy_unverified = FALSE, updated_at = NOW()
+		WHERE id = $1::uuid
+		RETURNING ` + userProfileSelect + `
+	`
+
+	user, err := scanUserRow(r.client.pool.QueryRow(ctx, query, strings.TrimSpace(userID), strings.TrimSpace(strings.ToLower(email))))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return authsvc.User{}, authsvc.ErrUserNotFound
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return authsvc.User{}, authsvc.ErrEmailTaken
 		}
 		return authsvc.User{}, err

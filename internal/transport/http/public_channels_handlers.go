@@ -389,16 +389,7 @@ func newPublicChannelByIDHandler(chat ChatService, i18n Translator, defaultLocal
 					writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
 					return
 				}
-				updated, err := chat.UpdateChat(r.Context(), chatsvc.UpdateChatInput{
-					UserID:          userID,
-					ChatID:          channelID,
-					Title:           chatsvc.OptionalString{Set: req.Title != nil, Value: req.Title},
-					AvatarDataURL:   chatsvc.OptionalString{Set: req.AvatarDataURL != nil, Value: req.AvatarDataURL},
-					AvatarGradient:  chatsvc.OptionalString{Set: req.AvatarGradient != nil, Value: req.AvatarGradient},
-					CommentsEnabled: chatsvc.OptionalBool{Set: req.CommentsEnabled != nil, Value: req.CommentsEnabled != nil && *req.CommentsEnabled},
-					IsPublic:        chatsvc.OptionalBool{Set: req.IsPublic != nil, Value: req.IsPublic != nil && *req.IsPublic},
-					PublicSlug:      chatsvc.OptionalString{Set: req.PublicSlug != nil, Value: req.PublicSlug},
-				})
+				updated, err := chat.UpdateChat(r.Context(), updateChatInputFromRequest(userID, channelID, req))
 				if err != nil {
 					writeChatServiceError(w, r, err, i18n, defaultLocale)
 					return

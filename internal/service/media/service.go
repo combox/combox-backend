@@ -3,6 +3,7 @@ package media
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -102,6 +103,9 @@ type Attachment struct {
 	ProcessedAt        *time.Time `json:"processed_at,omitempty"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
+	// UserMeta carries client supplied metadata for voice messages and video
+	// notes (waveform peaks, round flag, recorded duration).
+	UserMeta map[string]any `json:"user_meta,omitempty"`
 }
 
 type CreateAttachmentInput struct {
@@ -183,6 +187,7 @@ type Repository interface {
 	CanUserAccessAttachment(ctx context.Context, userID, attachmentID string) (bool, error)
 	SetAttachmentUploadID(ctx context.Context, id string, uploadID string) error
 	SetAttachmentMeta(ctx context.Context, id string, width *int, height *int, durationMS *int) error
+	SetAttachmentUserMeta(ctx context.Context, userID, attachmentID string, meta map[string]any) error
 	SetProcessing(ctx context.Context, id string, status string, processingError *string, previewObjectKey *string, hlsMasterObjectKey *string, processedAt *time.Time) error
 	CreateSession(ctx context.Context, s MediaSession) (MediaSession, error)
 	GetSession(ctx context.Context, id string) (MediaSession, error)
@@ -200,6 +205,10 @@ type ObjectStore interface {
 	GetObject(ctx context.Context, objectKey string) (io.ReadCloser, error)
 	PutObject(ctx context.Context, objectKey, contentType string, body io.Reader, size int64) error
 	DeleteObject(ctx context.Context, objectKey string) error
+	// CopyObject server-side copies one stored object to another key; the
+	// playlist pin uses it so the saved copy never shares storage with the
+	// source chat attachment.
+	CopyObject(ctx context.Context, srcKey, dstKey string) error
 }
 
 type Service struct {
@@ -262,7 +271,7 @@ func (s *Service) CreateAttachment(ctx context.Context, input CreateAttachmentIn
 		return CreateAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input", Details: map[string]string{"size_bytes": "max_5_gb"}}
 	}
 	if (strings.HasPrefix(mime, "video/") || strings.HasPrefix(mime, "audio/") || mime == "application/ogg") && !strings.EqualFold(kind, "file") {
-		if _, ok := allowedStreamMIMEs[strings.ToLower(mime)]; !ok {
+		if _, ok := allowedStreamMIMEs[baseMIMEType(mime)]; !ok {
 			return CreateAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.unsupported_mime"}
 		}
 	}
@@ -411,7 +420,7 @@ func (s *Service) GetAttachment(ctx context.Context, requesterUserID, attachment
 	}
 
 	urlStr := ""
-	if (strings.EqualFold(a.Kind, "video") || strings.EqualFold(a.Kind, "audio")) && a.HLSMasterObjectKey != nil && strings.TrimSpace(*a.HLSMasterObjectKey) != "" {
+	if strings.EqualFold(a.Kind, "video") && a.HLSMasterObjectKey != nil && strings.TrimSpace(*a.HLSMasterObjectKey) != "" {
 		hlsURL, hlsErr := s.presignHLSPlaybackManifest(ctx, strings.TrimSpace(*a.HLSMasterObjectKey), playbackURLTTL)
 		if hlsErr == nil && strings.TrimSpace(hlsURL) != "" {
 			urlStr = hlsURL
@@ -434,6 +443,118 @@ func (s *Service) GetAttachment(ctx context.Context, requesterUserID, attachment
 	}
 
 	return GetAttachmentOutput{Attachment: a, URL: urlStr, PreviewURL: previewURL}, nil
+}
+
+// numericValue normalises the numeric shapes that may reach this layer
+// (JSON decoding yields float64, direct Go callers may pass ints).
+func numericValue(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+// baseMIMEType drops codec parameters so "video/webm;codecs=vp9,opus" is
+// compared against the plain types in allowedStreamMIMEs.
+func baseMIMEType(mime string) string {
+	if i := strings.IndexByte(mime, ';'); i >= 0 {
+		return strings.ToLower(strings.TrimSpace(mime[:i]))
+	}
+	return strings.ToLower(strings.TrimSpace(mime))
+}
+
+// allowedUserMetaKeys limits client supplied attachment metadata to the keys
+// the media renderers actually consume (voice messages, video notes).
+var allowedUserMetaKeys = map[string]struct{}{
+	"waveform":    {},
+	"round":       {},
+	"voice":       {},
+	"duration_ms": {},
+}
+
+const (
+	maxUserMetaKeys     = 8
+	maxUserMetaBytes    = 32 * 1024
+	maxWaveformSamples  = 1024
+	maxWaveformPeakUnit = 100
+)
+
+type SetUserMetaInput struct {
+	UserID       string
+	AttachmentID string
+	Meta         map[string]any
+}
+
+// SetUserMeta stores client supplied metadata (waveform peaks, round flag,
+// recorded duration) on an attachment owned by the requester.
+func (s *Service) SetUserMeta(ctx context.Context, input SetUserMetaInput) (GetAttachmentOutput, error) {
+	input.UserID = strings.TrimSpace(input.UserID)
+	input.AttachmentID = strings.TrimSpace(input.AttachmentID)
+	if input.UserID == "" || input.AttachmentID == "" {
+		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+	}
+	if len(input.Meta) == 0 || len(input.Meta) > maxUserMetaKeys {
+		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+	}
+	for key, value := range input.Meta {
+		if _, ok := allowedUserMetaKeys[key]; !ok {
+			return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+		}
+		switch key {
+		case "waveform":
+			peaks, ok := value.([]any)
+			if !ok || len(peaks) == 0 || len(peaks) > maxWaveformSamples {
+				return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+			}
+			for _, peak := range peaks {
+				n, ok := numericValue(peak)
+				if !ok || n < 0 || n > maxWaveformPeakUnit {
+					return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+				}
+			}
+		case "round":
+			if _, ok := value.(bool); !ok {
+				return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+			}
+		case "voice":
+			if _, ok := value.(bool); !ok {
+				return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+			}
+		case "duration_ms":
+			n, ok := numericValue(value)
+			if !ok || n < 0 {
+				return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+			}
+		}
+	}
+	if raw, err := json.Marshal(input.Meta); err != nil || len(raw) > maxUserMetaBytes {
+		return GetAttachmentOutput{}, &Error{Code: CodeInvalidArgument, MessageKey: "error.media.invalid_input"}
+	}
+
+	// Ownership check first so callers get not_found/forbidden consistently.
+	if _, err := s.GetAttachment(ctx, input.UserID, input.AttachmentID); err != nil {
+		return GetAttachmentOutput{}, err
+	}
+	if err := s.repo.SetAttachmentUserMeta(ctx, input.UserID, input.AttachmentID, input.Meta); err != nil {
+		if errors.Is(err, ErrAttachmentNotFound) {
+			return GetAttachmentOutput{}, &Error{Code: CodeForbidden, MessageKey: "error.media.forbidden", Cause: err}
+		}
+		return GetAttachmentOutput{}, &Error{Code: CodeInternal, MessageKey: "error.internal", Cause: err}
+	}
+	return s.GetAttachment(ctx, input.UserID, input.AttachmentID)
 }
 
 func (s *Service) presignHLSPlaybackManifest(ctx context.Context, masterKey string, ttl time.Duration) (string, error) {

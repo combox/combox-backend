@@ -16,12 +16,18 @@ func (s *Service) CreateChat(ctx context.Context, input CreateChatInput) (Chat, 
 	if !ok {
 		return Chat{}, invalidArg("error.chat.invalid_type")
 	}
+	kind := strings.TrimSpace(strings.ToLower(input.Kind))
+	if kind != "" && kind != ChatKindGroup && kind != ChatKindDirect {
+		return Chat{}, invalidArg("error.chat.invalid_input")
+	}
+	// An explicitly requested group must never be collapsed into a direct chat.
+	forceGroup := kind == ChatKindGroup
 
 	uniqueMembers := dedupeMembers(append(input.MemberIDs, userID))
-	if chatType == ChatTypeSecretE2E && len(uniqueMembers) != 2 {
+	if chatType == ChatTypeSecretE2E && (len(uniqueMembers) != 2 || forceGroup) {
 		return Chat{}, invalidArg("error.chat.secret_must_be_direct")
 	}
-	if len(uniqueMembers) == 2 {
+	if !forceGroup && len(uniqueMembers) == 2 {
 		existing, found, err := s.chats.FindDirectChatByMembers(ctx, uniqueMembers[0], uniqueMembers[1], chatType)
 		if err != nil {
 			return Chat{}, internal(err)
@@ -31,7 +37,7 @@ func (s *Service) CreateChat(ctx context.Context, input CreateChatInput) (Chat, 
 		}
 	}
 
-	created, err := s.chats.CreateChat(ctx, title, uniqueMembers, userID, chatType)
+	created, err := s.chats.CreateChat(ctx, title, uniqueMembers, userID, chatType, kind)
 	if err != nil {
 		return Chat{}, internal(err)
 	}
@@ -62,6 +68,7 @@ func (s *Service) BanPublicChannelUser(ctx context.Context, actorUserID, channel
 	if err := s.chats.UpsertPublicChannelBan(ctx, channelChatID, targetUserID, actorUserID); err != nil {
 		return internal(err)
 	}
+	s.recordChatEvent(ctx, channelChatID, actorUserID, targetUserID, ChatEventBanned, "")
 	return nil
 }
 
@@ -89,6 +96,7 @@ func (s *Service) UnbanPublicChannelUser(ctx context.Context, actorUserID, chann
 	if err := s.chats.DeletePublicChannelBan(ctx, channelChatID, targetUserID); err != nil {
 		return internal(err)
 	}
+	s.recordChatEvent(ctx, channelChatID, actorUserID, targetUserID, ChatEventUnbanned, "")
 	return nil
 }
 
@@ -266,7 +274,7 @@ func (s *Service) CreateDirectMessage(ctx context.Context, input CreateDirectMes
 
 	chatRef := existing
 	if !found {
-		created, err := s.chats.CreateChat(ctx, recipientID, []string{recipientID, userID}, userID, ChatTypeStandard)
+		created, err := s.chats.CreateChat(ctx, recipientID, []string{recipientID, userID}, userID, ChatTypeStandard, "")
 		if err != nil {
 			return Message{}, Chat{}, internal(err)
 		}
@@ -388,7 +396,7 @@ func (s *Service) OpenDirectChat(ctx context.Context, input OpenDirectChatInput)
 		return existing, nil
 	}
 
-	created, err := s.chats.CreateChat(ctx, recipientID, []string{recipientID, userID}, userID, ChatTypeStandard)
+	created, err := s.chats.CreateChat(ctx, recipientID, []string{recipientID, userID}, userID, ChatTypeStandard, "")
 	if err != nil {
 		return Chat{}, internal(err)
 	}
@@ -507,10 +515,27 @@ func (s *Service) ListChannels(ctx context.Context, userID, groupChatID string) 
 		return nil, internal(err)
 	}
 
-	// Virtual General topic: messages live on the group chat itself.
+	group, err := s.chats.GetChat(ctx, groupChatID)
+	if err != nil {
+		return nil, mapChatOrMessageRepoError(err)
+	}
+
+	// Virtual General topic: messages live on the group chat itself, so it
+	// mirrors the group row - the group's own title as its parent title and
+	// the group's last message sender/timestamp.
 	one := 1
 	trueVal := true
-	general := Chat{ID: groupChatID, Title: "General", Kind: "group", TopicNumber: &one, IsGeneral: &trueVal}
+	parentTitle := group.Title
+	general := Chat{
+		ID:                    groupChatID,
+		Title:                 "General",
+		Kind:                  "group",
+		TopicNumber:           &one,
+		IsGeneral:             &trueVal,
+		ParentTitle:           &parentTitle,
+		LastMessageSenderName: group.LastMessageSenderName,
+		LastMessageAt:         group.LastMessageAt,
+	}
 	for i := range items {
 		items[i].IsGeneral = nil
 	}
@@ -568,7 +593,22 @@ func (s *Service) SubscribePublicChannel(ctx context.Context, userID, chatID str
 		if strings.EqualFold(role, "banned") {
 			return Chat{}, forbidden("error.chat.forbidden")
 		}
-		return target, nil
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "owner", "admin", "subscriber":
+			// Already subscribed: idempotent, no write, so a repeated
+			// subscribe never creates a duplicate row (pairs are unique by
+			// PRIMARY KEY (chat_id, user_id) anyway) and the client flips
+			// to Unsubscribe from the returned viewer_role.
+			return s.GetChat(ctx, userID, chatID)
+		default:
+			// Legacy rows (e.g. boxchat ETL 'member') are channel members
+			// but not a valid standalone_channel role: normalize to
+			// subscriber so the client treats them as subscribed.
+			if err := s.chats.UpdateChatMemberRole(ctx, chatID, userID, "subscriber"); err != nil {
+				return Chat{}, internal(err)
+			}
+			return s.GetChat(ctx, userID, chatID)
+		}
 	case errors.Is(err, ErrChatNotFound):
 		// continue
 	default:
@@ -582,9 +622,12 @@ func (s *Service) SubscribePublicChannel(ctx context.Context, userID, chatID str
 		return Chat{}, internal(err)
 	}
 
-	updated, err := s.chats.GetChat(ctx, chatID)
+	// Resolve the avatar (and viewer state) through the service layer: the raw
+	// repository row carries an unresolved storage key that the client would
+	// render as a blank avatar.
+	updated, err := s.GetChat(ctx, userID, chatID)
 	if err != nil {
-		return Chat{}, mapChatOrMessageRepoError(err)
+		return Chat{}, err
 	}
 	return updated, nil
 }
@@ -606,6 +649,10 @@ func (s *Service) UnsubscribePublicChannel(ctx context.Context, userID, chatID s
 
 	role, err := s.chats.GetChatMemberRole(ctx, chatID, userID)
 	if err != nil {
+		if errors.Is(err, ErrChatNotFound) {
+			// Idempotent: not subscribed already reads as unsubscribed.
+			return nil
+		}
 		return internal(err)
 	}
 	if strings.EqualFold(role, "owner") {
@@ -663,26 +710,14 @@ func (s *Service) AddMembers(ctx context.Context, userID, chatID string, memberI
 	if len(nextMembers) == 0 {
 		return nil, invalidArg("error.chat.invalid_input")
 	}
-	if s.invites != nil {
-		ttl := s.inviteTTL
-		if ttl <= 0 {
-			ttl = defaultInviteTTL
-		}
-		for _, memberID := range nextMembers {
-			invite, err := s.invites.Create(ctx, chatID, userID, memberID, ttl)
-			if err != nil {
-				return nil, internal(err)
-			}
-			_, _, _ = s.CreateDirectMessage(ctx, CreateDirectMessageInput{
-				UserID:          userID,
-				RecipientUserID: memberID,
-				Content:         "You were invited to chat \"" + target.Title + "\"\n" + s.inviteURL(invite.Token),
-			})
-		}
-		return s.ListMembers(ctx, userID, chatID, false)
-	}
+	// Manual additions through POST /chats/{id}/members must take effect
+	// immediately. Personal invite DMs used to be sent here instead, which
+	// left the chat untouched and flooded the actor with direct chats.
 	if err := s.chats.AddChatMembers(ctx, chatID, nextMembers); err != nil {
 		return nil, internal(err)
+	}
+	for _, memberID := range nextMembers {
+		s.recordChatEvent(ctx, chatID, userID, memberID, ChatEventMemberJoined, "")
 	}
 	return s.ListMembers(ctx, userID, chatID, false)
 }
@@ -732,6 +767,7 @@ func (s *Service) UpdateMemberRole(ctx context.Context, actorUserID, chatID, tar
 	if err := s.chats.UpdateChatMemberRole(ctx, chatID, targetUserID, role); err != nil {
 		return nil, internal(err)
 	}
+	s.recordChatEvent(ctx, chatID, actorUserID, targetUserID, ChatEventRoleChanged, "role="+role)
 	return s.ListMembers(ctx, actorUserID, chatID, false)
 }
 
@@ -759,5 +795,6 @@ func (s *Service) RemoveMember(ctx context.Context, actorUserID, chatID, targetU
 	if err := s.chats.RemoveChatMember(ctx, chatID, targetUserID); err != nil {
 		return nil, internal(err)
 	}
+	s.recordChatEvent(ctx, chatID, actorUserID, targetUserID, ChatEventMemberRemoved, "")
 	return s.ListMembers(ctx, actorUserID, chatID, false)
 }

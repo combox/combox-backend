@@ -462,7 +462,9 @@ func testTranslator() mapTranslator {
 	}}
 }
 
-type stubChatService struct{}
+type stubChatService struct {
+	pinnedMessage *chatsvc.Message
+}
 
 func (stubChatService) CreateChat(context.Context, chatsvc.CreateChatInput) (chatsvc.Chat, error) {
 	return chatsvc.Chat{ID: "chat-1", Title: "General", Type: "standard", Kind: "group"}, nil
@@ -495,6 +497,10 @@ func (stubChatService) DeleteChat(context.Context, string, string) error {
 	return nil
 }
 
+func (stubChatService) DeleteChatForEveryone(context.Context, string, string) error {
+	return nil
+}
+
 func (stubChatService) UpdateChat(_ context.Context, input chatsvc.UpdateChatInput) (chatsvc.Chat, error) {
 	title := "General"
 	if input.Title.Set && input.Title.Value != nil {
@@ -516,6 +522,10 @@ func (stubChatService) ListMembers(context.Context, string, string, bool) ([]cha
 		{UserID: "u1", Role: "owner"},
 		{UserID: "u2", Role: "member"},
 	}, nil
+}
+
+func (stubChatService) ListChatEvents(context.Context, string, string, int) ([]chatsvc.ChatEvent, error) {
+	return []chatsvc.ChatEvent{}, nil
 }
 
 func (stubChatService) AddMembers(context.Context, string, string, []string) ([]chatsvc.ChatMember, error) {
@@ -583,6 +593,68 @@ func (stubChatService) LeaveChat(context.Context, string, string) error {
 	return nil
 }
 
+func (stubChatService) ArchiveChat(_ context.Context, _ string, chatID string, archived bool) (chatsvc.Chat, error) {
+	return chatsvc.Chat{ID: chatID, Title: "General", Type: "standard", Kind: "group", Archived: archived}, nil
+}
+
+func (stubChatService) PinChat(_ context.Context, _ string, chatID string, pinned bool, pinScope string, pinOrder int64) (chatsvc.Chat, error) {
+	return chatsvc.Chat{ID: chatID, Title: "General", Type: "standard", Kind: "group", Pinned: pinned, PinScope: pinScope, PinOrder: pinOrder}, nil
+}
+
+func (stubChatService) MarkChatRead(context.Context, string, string) error {
+	return nil
+}
+
+func (stubChatService) ClearChatHistory(context.Context, string, string) (int, error) {
+	return 0, nil
+}
+
+func (stubChatService) ExportChatHistory(_ context.Context, _ string, chatID string) (chatsvc.ChatExport, error) {
+	return chatsvc.ChatExport{
+		Chat:     chatsvc.Chat{ID: chatID, Title: "General", Type: "standard", Kind: "group"},
+		Messages: []chatsvc.ChatExportMessage{},
+	}, nil
+}
+
+func (stubChatService) SetChatWallpaper(_ context.Context, _ string, chatID, wallpaperKind, wallpaperValue string) (chatsvc.Chat, error) {
+	item := chatsvc.Chat{ID: chatID, Title: "General", Type: "standard", Kind: "group"}
+	kind := strings.TrimSpace(wallpaperKind)
+	if kind == "" {
+		kind = chatsvc.WallpaperKindNone
+	}
+	item.WallpaperKind = &kind
+	if value := strings.TrimSpace(wallpaperValue); value != "" {
+		item.WallpaperValue = &value
+	}
+	return item, nil
+}
+
+func (stubChatService) CreatePoll(_ context.Context, input chatsvc.CreatePollInput) (chatsvc.Message, error) {
+	poll := chatsvc.Poll{
+		ID:          "poll-1",
+		ChatID:      input.ChatID,
+		MessageID:   "msg-1",
+		Question:    input.Question,
+		Options:     []chatsvc.PollOption{},
+		MyOptionIDs: []string{},
+		CreatedBy:   input.UserID,
+	}
+	message := chatsvc.Message{ID: "msg-1", ChatID: input.ChatID, UserID: input.UserID, Content: input.Question, Poll: &poll}
+	return message, nil
+}
+
+func (stubChatService) GetPoll(context.Context, string, string) (chatsvc.Poll, error) {
+	return chatsvc.Poll{ID: "poll-1", MyOptionIDs: []string{}}, nil
+}
+
+func (stubChatService) VotePoll(context.Context, chatsvc.VotePollInput) (chatsvc.Poll, error) {
+	return chatsvc.Poll{ID: "poll-1", MyOptionIDs: []string{}}, nil
+}
+
+func (stubChatService) ClosePoll(context.Context, string, string) (chatsvc.Poll, error) {
+	return chatsvc.Poll{ID: "poll-1", IsClosed: true, Closed: true, MyOptionIDs: []string{}}, nil
+}
+
 func (stubChatService) ListChats(context.Context, string) ([]chatsvc.Chat, error) {
 	return []chatsvc.Chat{{ID: "chat-1", Title: "General", Type: "standard", Kind: "group"}}, nil
 }
@@ -627,6 +699,20 @@ func (stubChatService) ToggleMessageReactionByID(context.Context, string, string
 	return nil, "set", nil
 }
 
+func (s stubChatService) GetPinnedMessage(context.Context, string, string) (*chatsvc.Message, error) {
+	return s.pinnedMessage, nil
+}
+
+func (s stubChatService) PinMessage(_ context.Context, input chatsvc.PinMessageInput) (*chatsvc.Message, error) {
+	if !input.Pinned {
+		return nil, nil
+	}
+	if s.pinnedMessage != nil {
+		return s.pinnedMessage, nil
+	}
+	return &chatsvc.Message{ID: input.MessageID, ChatID: input.ChatID, Content: "pinned"}, nil
+}
+
 func (stubChatService) GetOrCreateCommentThread(context.Context, string, string, string) (string, error) {
 	return "thread-1", nil
 }
@@ -653,6 +739,38 @@ func (stubChatService) ListPublicChannelBans(context.Context, string, string, in
 
 func (stubChatService) ListPublicChannelMutes(context.Context, string, string, int) ([]chatsvc.PublicChannelModerationEntry, error) {
 	return nil, nil
+}
+
+func (stubChatService) ListChatFolders(context.Context, string) ([]chatsvc.ChatFolder, error) {
+	return []chatsvc.ChatFolder{}, nil
+}
+
+func (stubChatService) CreateChatFolder(context.Context, chatsvc.CreateChatFolderInput) (chatsvc.ChatFolder, error) {
+	return chatsvc.ChatFolder{}, nil
+}
+
+func (stubChatService) UpdateChatFolder(context.Context, chatsvc.UpdateChatFolderInput) (chatsvc.ChatFolder, error) {
+	return chatsvc.ChatFolder{}, nil
+}
+
+func (stubChatService) SetChatFolderChats(context.Context, string, string, []string) (chatsvc.ChatFolder, error) {
+	return chatsvc.ChatFolder{}, nil
+}
+
+func (stubChatService) DeleteChatFolder(context.Context, string, string) error {
+	return nil
+}
+
+func (stubChatService) CreateChatFolderInvite(context.Context, string, string) (chatsvc.ChatFolderInvite, error) {
+	return chatsvc.ChatFolderInvite{}, nil
+}
+
+func (stubChatService) RevokeChatFolderInvite(context.Context, string, string) error {
+	return nil
+}
+
+func (stubChatService) ResolveChatFolderInvite(context.Context, string, string) (chatsvc.ResolvedFolderInvite, error) {
+	return chatsvc.ResolvedFolderInvite{Chats: []chatsvc.ResolvedFolderInviteChat{}}, nil
 }
 
 type stubAuthService struct {
@@ -782,6 +900,26 @@ func (s stubAuthService) UpdateEmail(context.Context, string, string) (authsvc.U
 	}, nil
 }
 
+func (s stubAuthService) ListSessions(context.Context, string, string) ([]authsvc.ActiveSession, error) {
+	return []authsvc.ActiveSession{}, nil
+}
+
+func (s stubAuthService) RevokeSession(context.Context, string, string) error {
+	return nil
+}
+
+func (s stubAuthService) RevokeOtherSessions(context.Context, string, string) (int64, error) {
+	return 0, nil
+}
+
+func (s stubAuthService) IsLegacyUnverified(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (s stubAuthService) CompleteLegacyBind(context.Context, string, string, string, string) (authsvc.User, authsvc.Tokens, error) {
+	return authsvc.User{}, authsvc.Tokens{}, nil
+}
+
 func TestRegisterRouteReturnsErrorEnvelope(t *testing.T) {
 	router := NewRouter(RouterDeps{
 		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -888,5 +1026,207 @@ func TestUpdateChatRoute(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), `"chat":{"id":"chat-1","title":"Renamed"`) {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+}
+
+// recordingChatService captures the input the handler builds so tests can
+// assert that PATCH payloads survive the HTTP layer.
+type recordingChatService struct {
+	stubChatService
+	lastUpdateInput chatsvc.UpdateChatInput
+	lastEventsCall  *chatEventsCall
+}
+
+type chatEventsCall struct {
+	chatID string
+	limit  int
+	events []chatsvc.ChatEvent
+}
+
+func (s *recordingChatService) UpdateChat(ctx context.Context, input chatsvc.UpdateChatInput) (chatsvc.Chat, error) {
+	s.lastUpdateInput = input
+	return s.stubChatService.UpdateChat(ctx, input)
+}
+
+func (s *recordingChatService) ListChatEvents(_ context.Context, _ string, chatID string, limit int) ([]chatsvc.ChatEvent, error) {
+	if s.lastEventsCall == nil {
+		s.lastEventsCall = &chatEventsCall{}
+	}
+	s.lastEventsCall.chatID = chatID
+	s.lastEventsCall.limit = limit
+	return s.lastEventsCall.events, nil
+}
+
+func TestUpdateChatRoutePassesSendPermissionAndSettings(t *testing.T) {
+	chatStub := &recordingChatService{}
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		AccessSecret:  "test-secret",
+		Chat:          chatStub,
+	})
+
+	body := `{
+		"send_permission": "admins",
+		"reactions_enabled": false,
+		"sign_messages": true,
+		"show_authors_profiles": true,
+		"auto_translate": true,
+		"slow_mode_seconds": 30,
+		"discussion_chat_id": "chat-2"
+	}`
+	req := httptest.NewRequest(stdhttp.MethodPatch, "/api/private/v1/chats/chat-1", strings.NewReader(body))
+	token := makeAccessToken(t, "u1", "test-secret", time.Now().UTC().Add(10*time.Minute).Unix())
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusOK {
+		t.Fatalf("expected 200, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+
+	got := chatStub.lastUpdateInput
+	if !got.SendPermission.Set || got.SendPermission.Value == nil || *got.SendPermission.Value != "admins" {
+		t.Fatalf("send_permission was dropped: %+v", got.SendPermission)
+	}
+	if !got.ReactionsEnabled.Set || got.ReactionsEnabled.Value {
+		t.Fatalf("reactions_enabled was dropped: %+v", got.ReactionsEnabled)
+	}
+	if !got.SignMessages.Set || !got.SignMessages.Value {
+		t.Fatalf("sign_messages was dropped: %+v", got.SignMessages)
+	}
+	if !got.ShowAuthorsProfiles.Set || !got.ShowAuthorsProfiles.Value {
+		t.Fatalf("show_authors_profiles was dropped: %+v", got.ShowAuthorsProfiles)
+	}
+	if !got.AutoTranslate.Set || !got.AutoTranslate.Value {
+		t.Fatalf("auto_translate was dropped: %+v", got.AutoTranslate)
+	}
+	if !got.SlowModeSeconds.Set || got.SlowModeSeconds.Value != 30 {
+		t.Fatalf("slow_mode_seconds was dropped: %+v", got.SlowModeSeconds)
+	}
+	if !got.DiscussionChatID.Set || got.DiscussionChatID.Value == nil || *got.DiscussionChatID.Value != "chat-2" {
+		t.Fatalf("discussion_chat_id was dropped: %+v", got.DiscussionChatID)
+	}
+}
+
+func TestUpdateChatRoutePassesDescriptionIconAndChannelType(t *testing.T) {
+	chatStub := &recordingChatService{}
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		AccessSecret:  "test-secret",
+		Chat:          chatStub,
+	})
+
+	body := `{"description":"About the team","icon_emoji":"📌","channel_type":"voice"}`
+	req := httptest.NewRequest(stdhttp.MethodPatch, "/api/private/v1/chats/chat-1", strings.NewReader(body))
+	token := makeAccessToken(t, "u1", "test-secret", time.Now().UTC().Add(10*time.Minute).Unix())
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusOK {
+		t.Fatalf("expected 200, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+
+	got := chatStub.lastUpdateInput
+	if !got.Description.Set || got.Description.Value == nil || *got.Description.Value != "About the team" {
+		t.Fatalf("description was dropped: %+v", got.Description)
+	}
+	if !got.IconEmoji.Set || got.IconEmoji.Value == nil || *got.IconEmoji.Value != "📌" {
+		t.Fatalf("icon_emoji was dropped: %+v", got.IconEmoji)
+	}
+	if !got.ChannelType.Set || got.ChannelType.Value == nil || *got.ChannelType.Value != "voice" {
+		t.Fatalf("channel_type was dropped: %+v", got.ChannelType)
+	}
+
+	// JSON null must map to "leave unchanged" rather than a cleared value.
+	req = httptest.NewRequest(stdhttp.MethodPatch, "/api/private/v1/chats/chat-1", strings.NewReader(`{"description":null,"icon_emoji":null,"channel_type":null}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusOK {
+		t.Fatalf("expected 200 for null values, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+	got = chatStub.lastUpdateInput
+	if got.Description.Set || got.IconEmoji.Set || got.ChannelType.Set {
+		t.Fatalf("JSON null should leave the fields unchanged: %+v %+v %+v", got.Description, got.IconEmoji, got.ChannelType)
+	}
+}
+
+func TestListChatEventsRoute(t *testing.T) {
+	chatStub := &recordingChatService{
+		lastEventsCall: &chatEventsCall{events: []chatsvc.ChatEvent{{
+			ID:        "evt-1",
+			ChatID:    "chat-1",
+			EventType: chatsvc.ChatEventSettingsChanged,
+			Payload:   "reactions_enabled=false",
+		}}},
+	}
+	router := NewRouter(RouterDeps{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Postgres:      stubPinger{},
+		Valkey:        stubPinger{},
+		ReadyTimeout:  time.Second,
+		I18n:          testTranslator(),
+		DefaultLocale: "en",
+		AccessSecret:  "test-secret",
+		Chat:          chatStub,
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodGet, "/api/private/v1/chats/chat-1/events?limit=25", nil)
+	token := makeAccessToken(t, "u1", "test-secret", time.Now().UTC().Add(10*time.Minute).Unix())
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusOK {
+		t.Fatalf("expected 200, got %d; body=%s", rr.Code, rr.Body.String())
+	}
+	if chatStub.lastEventsCall == nil || chatStub.lastEventsCall.chatID != "chat-1" || chatStub.lastEventsCall.limit != 25 {
+		t.Fatalf("events call was not routed correctly: %+v", chatStub.lastEventsCall)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"event_type":"settings_changed"`) || !strings.Contains(body, `"reactions_enabled=false"`) {
+		t.Fatalf("unexpected body: %s", body)
+	}
+
+	req = httptest.NewRequest(stdhttp.MethodGet, "/api/private/v1/chats/chat-1/events", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusOK {
+		t.Fatalf("expected 200 without a limit, got %d", rr.Code)
+	}
+	if chatStub.lastEventsCall.limit != 0 {
+		t.Fatalf("expected the default limit (0) to reach the service, got %d", chatStub.lastEventsCall.limit)
+	}
+
+	req = httptest.NewRequest(stdhttp.MethodGet, "/api/private/v1/chats/chat-1/events?limit=abc", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusBadRequest {
+		t.Fatalf("expected 400 for a malformed limit, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), `"code":"invalid_argument"`) {
+		t.Fatalf("expected invalid_argument, got %s", rr.Body.String())
+	}
+
+	req = httptest.NewRequest(stdhttp.MethodPost, "/api/private/v1/chats/chat-1/events", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != stdhttp.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for POST, got %d", rr.Code)
 	}
 }

@@ -210,23 +210,32 @@ func newLoginHandler(auth AuthService, emailCode EmailCodeService, i18n Translat
 			writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
 			return
 		}
-		if emailCode == nil {
-			writeAPIError(w, r, http.StatusServiceUnavailable, "service_unavailable", "error.auth.email_code_unavailable", nil, i18n, defaultLocale)
-			return
-		}
-		loginKey := strings.TrimSpace(req.LoginKey)
-		if loginKey == "" {
-			writeAPIError(w, r, http.StatusUnauthorized, "invalid_credentials", "error.auth.login_key_required", nil, i18n, defaultLocale)
-			return
-		}
-		ok, err := emailCode.ValidateLoginKey(r.Context(), req.Login, loginKey)
-		if err != nil {
-			writeAPIError(w, r, http.StatusBadRequest, "invalid_argument", "error.auth.invalid_input", nil, i18n, defaultLocale)
-			return
-		}
-		if !ok {
-			writeAPIError(w, r, http.StatusUnauthorized, "invalid_credentials", "error.auth.login_key_invalid", nil, i18n, defaultLocale)
-			return
+		// Migrated boxchat users (is_legacy_unverified, migration 000044)
+		// carry a placeholder email they can never receive codes at, so the
+		// login_key (email-code) gate is skipped for them only. The password
+		// is then checked against the werkzeug scrypt hash and a migr-limited
+		// session is issued. The regular flow below is unchanged.
+		legacy, legacyErr := auth.IsLegacyUnverified(r.Context(), req.Login)
+		isLegacy := legacyErr == nil && legacy
+		if !isLegacy {
+			if emailCode == nil {
+				writeAPIError(w, r, http.StatusServiceUnavailable, "service_unavailable", "error.auth.email_code_unavailable", nil, i18n, defaultLocale)
+				return
+			}
+			loginKey := strings.TrimSpace(req.LoginKey)
+			if loginKey == "" {
+				writeAPIError(w, r, http.StatusUnauthorized, "invalid_credentials", "error.auth.login_key_required", nil, i18n, defaultLocale)
+				return
+			}
+			ok, err := emailCode.ValidateLoginKey(r.Context(), req.Login, loginKey)
+			if err != nil {
+				writeAPIError(w, r, http.StatusBadRequest, "invalid_argument", "error.auth.invalid_input", nil, i18n, defaultLocale)
+				return
+			}
+			if !ok {
+				writeAPIError(w, r, http.StatusUnauthorized, "invalid_credentials", "error.auth.login_key_invalid", nil, i18n, defaultLocale)
+				return
+			}
 		}
 
 		user, tokens, err := auth.Login(r.Context(), authsvc.LoginInput{
@@ -239,18 +248,25 @@ func newLoginHandler(auth AuthService, emailCode EmailCodeService, i18n Translat
 			writeAuthServiceError(w, r, err, i18n, defaultLocale)
 			return
 		}
-		_, _ = emailCode.ConsumeLoginKey(r.Context(), req.Login, loginKey)
+		if !isLegacy {
+			_, _ = emailCode.ConsumeLoginKey(r.Context(), req.Login, strings.TrimSpace(req.LoginKey))
+		}
 
 		locale := requestLocale(r, defaultLocale)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"message": i18n.Translate(locale, "auth.login.success"),
-			"user":    mapAuthUser(user),
-			"tokens":  tokens,
+			"message":            i18n.Translate(locale, "auth.login.success"),
+			"user":               mapAuthUser(user),
+			"tokens":             tokens,
+			"migration_required": user.IsLegacyUnverified,
 		})
 	}
 }
 
 func mapAuthUser(user authsvc.User) map[string]any {
+	tracks := user.SavedTracks
+	if tracks == nil {
+		tracks = []authsvc.SavedTrack{}
+	}
 	return map[string]any{
 		"id":                       user.ID,
 		"email":                    user.Email,
@@ -260,6 +276,12 @@ func mapAuthUser(user authsvc.User) map[string]any {
 		"birth_date":               user.BirthDate,
 		"avatar_data_url":          user.AvatarDataURL,
 		"avatar_gradient":          user.AvatarGradient,
+		"bio":                      user.Bio,
+		"phone_number":             user.PhoneNumber,
+		"name_color":               user.NameColor,
+		"playlist_title":           user.PlaylistTitle,
+		"playlist_is_public":       user.PlaylistIsPublic,
+		"saved_tracks":             tracks,
 		"session_idle_ttl_seconds": user.SessionIdleTTLSeconds,
 	}
 }
@@ -347,6 +369,8 @@ func writeAuthServiceError(w http.ResponseWriter, r *http.Request, err error, i1
 			status = http.StatusUnauthorized
 		case authsvc.CodeConflict:
 			status = http.StatusConflict
+		case authsvc.CodeNotFound:
+			status = http.StatusNotFound
 		}
 		writeAPIError(w, r, status, serviceErr.Code, serviceErr.MessageKey, serviceErr.Details, i18n, defaultLocale)
 		return

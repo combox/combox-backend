@@ -6,6 +6,7 @@ import (
 	"time"
 
 	vkrepo "combox-backend/internal/repository/valkey"
+	privacysvc "combox-backend/internal/service/privacy"
 )
 
 const presenceOnlineTTL = 90 * time.Second
@@ -18,7 +19,7 @@ type presenceResponseItem struct {
 	LastSeenVisible bool   `json:"last_seen_visible"`
 }
 
-func newPresenceHandler(presenceRepo *vkrepo.PresenceRepository, settingsRepo *vkrepo.ProfileSettingsRepository, i18n Translator, defaultLocale string) http.HandlerFunc {
+func newPresenceHandler(presenceRepo *vkrepo.PresenceRepository, settingsRepo *vkrepo.ProfileSettingsRepository, privacy PrivacyService, i18n Translator, defaultLocale string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
 		if userID == "" {
@@ -53,6 +54,9 @@ func newPresenceHandler(presenceRepo *vkrepo.PresenceRepository, settingsRepo *v
 			return
 		}
 
+		// One memo for the whole batch: at most one privacy settings read per
+		// distinct requested user.
+		privacyCtx := privacysvc.WithMemo(r.Context())
 		out := make([]presenceResponseItem, 0, len(ids))
 		for _, id := range ids {
 			item := items[id]
@@ -62,6 +66,17 @@ func newPresenceHandler(presenceRepo *vkrepo.PresenceRepository, settingsRepo *v
 				UserID:          id,
 				Online:          item.Online,
 				LastSeenVisible: visible,
+			}
+			// The owner's last_seen rule wins over show_last_seen: when the
+			// viewer is not allowed, both online and last_seen are masked.
+			if privacy != nil && id != userID {
+				if allowed, perr := privacy.Evaluate(privacyCtx, userID, id, privacysvc.ParamLastSeen); perr != nil || !allowed {
+					resp.Online = false
+					resp.LastSeenVisible = false
+					resp.LastSeen = ""
+					out = append(out, resp)
+					continue
+				}
 			}
 			if visible && !item.LastSeen.IsZero() {
 				resp.LastSeen = item.LastSeen.UTC().Format(time.RFC3339)

@@ -12,10 +12,12 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	vkrepo "combox-backend/internal/repository/valkey"
 	"combox-backend/internal/service/chat"
+	privacysvc "combox-backend/internal/service/privacy"
 
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
@@ -28,6 +30,10 @@ type wsRealtime interface {
 type wsDeps struct {
 	ChatService   ChatService
 	SearchService SearchService
+	ProfileRepo   *vkrepo.ProfileSettingsRepository
+	// Privacy gates live presence frames (last_seen rule of the origin owner);
+	// nil keeps the legacy pass-through behaviour.
+	Privacy PrivacyService
 }
 
 var wsUpgrader = websocket.Upgrader{
@@ -73,51 +79,90 @@ func newWSHandler(valkey wsRealtime, deps wsDeps, accessSecret string, i18n Tran
 
 		presenceRepo := vkrepo.NewPresenceRepositoryFromRedis(valkey.Client())
 		eventPublisher := vkrepo.NewEventPublisherFromRedis(valkey.Client())
+		// Presence frames carry the owner's "show last seen" setting so a
+		// subscriber never renders a timestamp the owner has hidden.
+		lastSeenVisible := true
+		if deps.ProfileRepo != nil {
+			if settings, settingsErr := deps.ProfileRepo.Get(ctx, userID); settingsErr == nil {
+				lastSeenVisible = settings.ShowLastSeen
+			}
+		}
+		publishPresence := func(online bool, at time.Time) {
+			_ = eventPublisher.PublishPresence(ctx, vkrepo.PresenceEvent{
+				UserID:          userID,
+				Online:          online,
+				LastSeen:        at,
+				UpdatedAt:       at,
+				LastSeenVisible: &lastSeenVisible,
+			})
+		}
 		connID := newPresenceConnID()
 		presenceConnsKey := "presence:conns:" + userID
+		// Connections that currently report an active (visible) tab. Online is
+		// derived from this set instead of the socket being open, so a hidden
+		// or collapsed tab stops presenting itself as online after its TTL.
+		presenceActiveKey := "presence:active:" + userID
+		// Per-connection visibility flag, authoritative source is the latest
+		// presence.ping from this socket (default true at connect). The
+		// server ping ticker and non-presence frames must never flip an
+		// inactive connection back to active: they only refresh the conns TTL
+		// (socket is alive) while the tab stays reported offline.
+		var connActive atomic.Bool
+		connActive.Store(true)
 		_ = valkey.Client().SAdd(ctx, presenceConnsKey, connID).Err()
 		_ = valkey.Client().Expire(ctx, presenceConnsKey, 90*time.Second).Err()
+		_ = valkey.Client().SAdd(ctx, presenceActiveKey, connID).Err()
+		_ = valkey.Client().Expire(ctx, presenceActiveKey, 90*time.Second).Err()
 		now := time.Now().UTC()
 		_ = presenceRepo.SetOnline(ctx, userID, now, 90*time.Second)
-		_ = eventPublisher.PublishPresence(ctx, vkrepo.PresenceEvent{
-			UserID:    userID,
-			Online:    true,
-			LastSeen:  now,
-			UpdatedAt: now,
-		})
+		publishPresence(true, now)
+		offlinePublished := false
 		defer func() {
 			_ = conn.Close()
 			_ = valkey.Client().SRem(ctx, presenceConnsKey, connID).Err()
-			if cnt, err := valkey.Client().SCard(ctx, presenceConnsKey).Result(); err == nil && cnt == 0 {
+			_ = valkey.Client().SRem(ctx, presenceActiveKey, connID).Err()
+			if cnt, err := valkey.Client().SCard(ctx, presenceActiveKey).Result(); err == nil && cnt == 0 {
 				offlineAt := time.Now().UTC()
 				_ = presenceRepo.SetOffline(ctx, userID, offlineAt, 30*24*time.Hour)
-				_ = eventPublisher.PublishPresence(ctx, vkrepo.PresenceEvent{
-					UserID:    userID,
-					Online:    false,
-					LastSeen:  offlineAt,
-					UpdatedAt: offlineAt,
-				})
+				publishPresence(false, offlineAt)
 			}
 		}()
 
 		var subMu sync.Mutex
 		var writeMu sync.Mutex
 		presenceSubs := map[string]struct{}{}
+		chatSubs := map[string]struct{}{}
+		lastTypingAt := map[string]time.Time{}
+		lastChatJoinAt := time.Time{}
 		lastPresenceTouch := time.Now().UTC().Add(-10 * time.Second)
-		touchPresence := func(force bool) {
+		// active==false means the owning tab is hidden/minimised: drop this
+		// connection from the active set and only report offline once no other
+		// connection still claims to be active.
+		touchPresence := func(force bool, active bool) {
 			nowTouch := time.Now().UTC()
 			if !force && nowTouch.Sub(lastPresenceTouch) < 3*time.Second {
 				return
 			}
 			lastPresenceTouch = nowTouch
-			_ = presenceRepo.SetOnline(ctx, userID, nowTouch, 90*time.Second)
 			_ = valkey.Client().Expire(ctx, presenceConnsKey, 90*time.Second).Err()
-			_ = eventPublisher.PublishPresence(ctx, vkrepo.PresenceEvent{
-				UserID:    userID,
-				Online:    true,
-				LastSeen:  nowTouch,
-				UpdatedAt: nowTouch,
-			})
+			if !active {
+				_ = valkey.Client().SRem(ctx, presenceActiveKey, connID).Err()
+				if cnt, err := valkey.Client().SCard(ctx, presenceActiveKey).Result(); err == nil && cnt > 0 {
+					return
+				}
+				if offlinePublished {
+					return
+				}
+				offlinePublished = true
+				_ = presenceRepo.SetOffline(ctx, userID, nowTouch, 30*24*time.Hour)
+				publishPresence(false, nowTouch)
+				return
+			}
+			offlinePublished = false
+			_ = valkey.Client().SAdd(ctx, presenceActiveKey, connID).Err()
+			_ = valkey.Client().Expire(ctx, presenceActiveKey, 90*time.Second).Err()
+			_ = presenceRepo.SetOnline(ctx, userID, nowTouch, 90*time.Second)
+			publishPresence(true, nowTouch)
 		}
 
 		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -144,10 +189,28 @@ func newWSHandler(valkey wsRealtime, deps wsDeps, accessSecret string, i18n Tran
 					continue
 				}
 				if msgType == "presence.ping" {
-					touchPresence(true)
+					active := true
+					if rawActive, ok := raw["active"].(bool); ok {
+						active = rawActive
+					}
+					connActive.Store(active)
+					touchPresence(true, active)
 					continue
 				}
-				touchPresence(false)
+				if connActive.Load() {
+					touchPresence(false, true)
+				} else {
+					// Hidden tab: the socket is alive so refresh only the conns
+					// TTL. Never re-add to the active set or re-publish online;
+					// only a presence.ping with active=true may do that.
+					_ = valkey.Client().Expire(ctx, presenceConnsKey, 90*time.Second).Err()
+				}
+				// Chat scoped frames: membership is checked once when joining a
+				// chat channel, typing heartbeats are then broadcast to it.
+				if msgType == "chat.subscribe" || msgType == "chat.unsubscribe" || msgType == "typing" {
+					handleChatFrame(ctx, raw, msgType, userID, deps, pubsub, valkey.Client(), &subMu, chatSubs, lastTypingAt, &lastChatJoinAt)
+					continue
+				}
 				// Requests with id/response pattern
 				if strings.HasPrefix(msgType, "request.") {
 					handleRequest(ctx, conn, &writeMu, raw, msgType, userID, deps, i18n, defaultLocale)
@@ -217,17 +280,27 @@ func newWSHandler(valkey wsRealtime, deps wsDeps, accessSecret string, i18n Tran
 				return
 			case <-ping.C:
 				writeMu.Lock()
-				_ = conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second))
+				pingErr := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second))
 				writeMu.Unlock()
+				if pingErr != nil {
+					// The peer is unreachable (frozen tab, dropped network).
+					// Stop refreshing presence so an active-but-dead session
+					// cannot stay online until the read deadline fires.
+					return
+				}
 				pingAt := time.Now().UTC()
-				_ = presenceRepo.SetOnline(ctx, userID, pingAt, 90*time.Second)
+				// Socket keepalive: the connection is alive regardless of tab
+				// visibility, so its TTL is always refreshed.
 				_ = valkey.Client().Expire(ctx, presenceConnsKey, 90*time.Second).Err()
-				_ = eventPublisher.PublishPresence(ctx, vkrepo.PresenceEvent{
-					UserID:    userID,
-					Online:    true,
-					LastSeen:  pingAt,
-					UpdatedAt: pingAt,
-				})
+				if !connActive.Load() {
+					// Hidden tab: do not re-add to the active set and do not
+					// re-publish online; the tab stays offline until it sends
+					// presence.ping with active=true again.
+					continue
+				}
+				_ = presenceRepo.SetOnline(ctx, userID, pingAt, 90*time.Second)
+				_ = valkey.Client().Expire(ctx, presenceActiveKey, 90*time.Second).Err()
+				publishPresence(true, pingAt)
 			case msg, ok := <-msgCh:
 				if !ok {
 					return
@@ -235,6 +308,9 @@ func newWSHandler(valkey wsRealtime, deps wsDeps, accessSecret string, i18n Tran
 				payload := strings.TrimSpace(msg.Payload)
 				if payload == "" {
 					continue
+				}
+				if deps.Privacy != nil {
+					payload = filterPresencePayload(ctx, deps.Privacy, userID, payload)
 				}
 				writeMu.Lock()
 				err := conn.WriteMessage(websocket.TextMessage, []byte(payload))
@@ -410,41 +486,61 @@ func handleRequest(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mute
 	}
 }
 
+// verifyAccessToken checks the signature, expiry and sub claim and returns the
+// user id. Migr-limited legacy tokens are rejected: realtime is unavailable
+// until the email is bound (the HTTP migr allowlist has no WS entry).
 func verifyAccessToken(token, secret string) (string, error) {
+	userID, _, migr, err := verifyAccessTokenWithSession(token, secret)
+	if err != nil {
+		return "", err
+	}
+	if migr {
+		return "", errors.New("migration email binding required")
+	}
+	return userID, nil
+}
+
+// verifyAccessTokenWithSession additionally returns the session id embedded as
+// "sid" and the legacy "migr" mark (boxchat migration, 000044). Tokens minted
+// before those claims existed simply return empty/false, which handlers treat
+// as "unknown"/"full".
+func verifyAccessTokenWithSession(token, secret string) (string, string, bool, error) {
 	secret = strings.TrimSpace(secret)
 	if secret == "" {
-		return "", errors.New("missing access secret")
+		return "", "", false, errors.New("missing access secret")
 	}
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 3 {
-		return "", errors.New("invalid token format")
+		return "", "", false, errors.New("invalid token format")
 	}
 	unsigned := parts[0] + "." + parts[1]
 	h := hmac.New(sha256.New, []byte(secret))
 	_, _ = h.Write([]byte(unsigned))
 	expected := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
 	if !hmac.Equal([]byte(expected), []byte(parts[2])) {
-		return "", errors.New("invalid signature")
+		return "", "", false, errors.New("invalid signature")
 	}
 
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", errors.New("invalid payload")
+		return "", "", false, errors.New("invalid payload")
 	}
 	var payload struct {
-		Sub string `json:"sub"`
-		Exp int64  `json:"exp"`
+		Sub  string `json:"sub"`
+		Sid  string `json:"sid"`
+		Migr bool   `json:"migr"`
+		Exp  int64  `json:"exp"`
 	}
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		return "", errors.New("invalid payload")
+		return "", "", false, errors.New("invalid payload")
 	}
 	if strings.TrimSpace(payload.Sub) == "" {
-		return "", errors.New("missing sub")
+		return "", "", false, errors.New("missing sub")
 	}
 	if payload.Exp > 0 && time.Now().UTC().Unix() > payload.Exp {
-		return "", errors.New("token expired")
+		return "", "", false, errors.New("token expired")
 	}
-	return strings.TrimSpace(payload.Sub), nil
+	return strings.TrimSpace(payload.Sub), strings.TrimSpace(payload.Sid), payload.Migr, nil
 }
 
 func newPresenceConnID() string {
@@ -453,4 +549,147 @@ func newPresenceConnID() string {
 		return fmt.Sprintf("conn-%d", time.Now().UTC().UnixNano())
 	}
 	return fmt.Sprintf("%x", buf)
+}
+
+const (
+	maxChatSubscriptions = 64
+	chatJoinMinGap       = 250 * time.Millisecond
+	typingPublishMinGap  = 1200 * time.Millisecond
+)
+
+// handleChatFrame routes the chat scoped frames of a realtime connection:
+//   - "chat.subscribe"   join the chat broadcast channel (membership checked here)
+//   - "chat.unsubscribe" leave it again
+//   - "typing"           forward a typing heartbeat to everyone in that chat
+//
+// Membership is verified once, when joining, so the per keystroke frame stays a
+// cheap Redis publish instead of a database round trip.
+func handleChatFrame(
+	ctx context.Context,
+	raw map[string]any,
+	msgType string,
+	userID string,
+	deps wsDeps,
+	pubsub *redis.PubSub,
+	rdb *redis.Client,
+	subMu *sync.Mutex,
+	chatSubs map[string]struct{},
+	lastTypingAt map[string]time.Time,
+	lastChatJoinAt *time.Time,
+) {
+	if rdb == nil {
+		return
+	}
+	chatID, _ := raw["chat_id"].(string)
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return
+	}
+	channel := "chat:" + chatID
+
+	switch msgType {
+	case "chat.subscribe":
+		if deps.ChatService == nil {
+			return
+		}
+		subMu.Lock()
+		_, already := chatSubs[channel]
+		full := !already && len(chatSubs) >= maxChatSubscriptions
+		if !already && lastChatJoinAt != nil && time.Since(*lastChatJoinAt) < chatJoinMinGap {
+			subMu.Unlock()
+			return
+		}
+		subMu.Unlock()
+		if already || full {
+			return
+		}
+		// ListMembers only answers for members of the chat.
+		if _, err := deps.ChatService.ListMembers(ctx, userID, chatID, false); err != nil {
+			return
+		}
+		if err := pubsub.Subscribe(ctx, channel); err != nil {
+			return
+		}
+		subMu.Lock()
+		chatSubs[channel] = struct{}{}
+		if lastChatJoinAt != nil {
+			*lastChatJoinAt = time.Now().UTC()
+		}
+		subMu.Unlock()
+	case "chat.unsubscribe":
+		subMu.Lock()
+		_, subscribed := chatSubs[channel]
+		if subscribed {
+			delete(chatSubs, channel)
+		}
+		subMu.Unlock()
+		if subscribed {
+			_ = pubsub.Unsubscribe(ctx, channel)
+		}
+	case "typing":
+		subMu.Lock()
+		_, subscribed := chatSubs[channel]
+		if !subscribed {
+			subMu.Unlock()
+			return
+		}
+		if last, ok := lastTypingAt[chatID]; ok && time.Since(last) < typingPublishMinGap {
+			subMu.Unlock()
+			return
+		}
+		lastTypingAt[chatID] = time.Now().UTC()
+		subMu.Unlock()
+
+		frame := map[string]any{
+			"type":    "typing",
+			"chat_id": chatID,
+			"user_id": userID,
+			"at":      time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		payload, err := json.Marshal(frame)
+		if err != nil {
+			return
+		}
+		_ = rdb.Publish(ctx, channel, payload).Err()
+	}
+}
+
+// filterPresencePayload hides an origin owner's live presence from a viewer
+// that the owner's last_seen privacy rule does not allow. Every other frame
+// (chat, typing, reactions, profile updates, ...) passes through untouched,
+// and an allowed presence frame keeps its original payload byte for byte.
+func filterPresencePayload(ctx context.Context, privacy PrivacyService, viewerID, payload string) string {
+	if !strings.Contains(payload, vkrepo.EventTypePresence) {
+		return payload
+	}
+	var ev vkrepo.PresenceEvent
+	if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+		return payload
+	}
+	if ev.Type != vkrepo.EventTypePresence {
+		return payload
+	}
+	ownerID := strings.TrimSpace(ev.UserID)
+	if ownerID == "" || ownerID == viewerID {
+		return payload
+	}
+	allowed, err := privacy.Evaluate(privacysvc.WithMemo(ctx), viewerID, ownerID, privacysvc.ParamLastSeen)
+	if err == nil && allowed {
+		return payload
+	}
+	// Fail closed: the presence lookup failed or the owner hides last seen.
+	// The frame keeps type/user_id but loses last_seen, updated_at (which is
+	// the same instant for an offline frame) and reports online: false with
+	// last_seen_visible: false, matching the REST presence shape.
+	frame := map[string]any{
+		"type":              ev.Type,
+		"user_id":           ev.UserID,
+		"online":            false,
+		"last_seen_visible": false,
+	}
+	out, err := json.Marshal(frame)
+	if err != nil {
+		return payload
+	}
+	return string(out)
 }

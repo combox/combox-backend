@@ -21,6 +21,9 @@ const (
 	defaultAccessTTL       = 15 * time.Minute
 	defaultRefreshTTL      = 24 * time.Hour * 30
 	defaultEmailCodeTTL    = 10 * time.Minute
+	defaultCallsTTL        = 12 * time.Hour
+	defaultCallsMeshLimit  = 2
+	defaultCallsMaxMembers = 200
 )
 
 type Config struct {
@@ -31,6 +34,8 @@ type Config struct {
 	Valkey     ValkeyConfig
 	MinIO      MinIOConfig
 	Migrations MigrationsConfig
+	Calls      CallsConfig
+	Translate  TranslateConfig
 }
 
 type AppConfig struct {
@@ -91,8 +96,34 @@ type MigrationsConfig struct {
 	Path    string
 }
 
+// CallsConfig drives the WebRTC/signaling subsystem (internal/calls).
+type CallsConfig struct {
+	Enabled           bool
+	STUNURLs          []string
+	TURNURLs          []string
+	TURNSharedSecret  string
+	TURNCredentialTTL time.Duration
+	MeshLimit         int
+	MaxParticipants   int
+	ICEPortMin        int
+	ICEPortMax        int
+	AllowLoopback     bool
+}
+
 type BotConfig struct {
 	TokenPepper string
+}
+
+// TranslateConfig drives the R19 auto-translate engine. Empty EngineURL
+// selects the MyMemory free endpoint (no key); a LibreTranslate-compatible
+// base URL enables server-side auto-detect of the source language.
+type TranslateConfig struct {
+	EngineURL       string
+	APIKey          string
+	MyMemoryEmail   string
+	Timeout         time.Duration
+	CacheTTL        time.Duration
+	RateLimitPerMin int
 }
 
 func Load() (Config, error) {
@@ -149,6 +180,26 @@ func Load() (Config, error) {
 		Migrations: MigrationsConfig{
 			Enabled: getBoolEnv("MIGRATIONS_ENABLED", true),
 			Path:    getEnv("MIGRATIONS_PATH", defaultMigrationsPath),
+		},
+		Calls: CallsConfig{
+			Enabled:           getBoolEnv("CALLS_ENABLED", true),
+			STUNURLs:          splitCSV(os.Getenv("CALLS_STUN_URLS")),
+			TURNURLs:          splitCSV(os.Getenv("CALLS_TURN_URLS")),
+			TURNSharedSecret:  strings.TrimSpace(os.Getenv("CALLS_TURN_SECRET")),
+			TURNCredentialTTL: getDurationEnv("CALLS_TURN_CREDENTIAL_TTL", defaultCallsTTL),
+			MeshLimit:         getIntEnv("CALLS_MESH_LIMIT", defaultCallsMeshLimit),
+			MaxParticipants:   getIntEnv("CALLS_MAX_PARTICIPANTS", defaultCallsMaxMembers),
+			ICEPortMin:        getIntEnv("CALLS_ICE_PORT_MIN", 0),
+			ICEPortMax:        getIntEnv("CALLS_ICE_PORT_MAX", 0),
+			AllowLoopback:     getBoolEnv("CALLS_ALLOW_LOOPBACK", false),
+		},
+		Translate: TranslateConfig{
+			EngineURL:       strings.TrimSpace(os.Getenv("TRANSLATE_ENGINE_URL")),
+			APIKey:          strings.TrimSpace(os.Getenv("TRANSLATE_API_KEY")),
+			MyMemoryEmail:   strings.TrimSpace(os.Getenv("TRANSLATE_MYMEMORY_EMAIL")),
+			Timeout:         getDurationEnv("TRANSLATE_TIMEOUT", 8*time.Second),
+			CacheTTL:        getDurationEnv("TRANSLATE_CACHE_TTL", 24*time.Hour),
+			RateLimitPerMin: getIntEnv("TRANSLATE_RATE_LIMIT_PER_MIN", 30),
 		},
 	}
 
@@ -240,6 +291,32 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Bot.TokenPepper) == "" {
 		return errors.New("BOT_TOKEN_PEPPER is required")
 	}
+	if c.Calls.Enabled {
+		if len(c.Calls.TURNURLs) > 0 && c.Calls.TURNSharedSecret == "" {
+			return errors.New("CALLS_TURN_SECRET is required when CALLS_TURN_URLS is set")
+		}
+		if c.Calls.MeshLimit < 1 {
+			return errors.New("CALLS_MESH_LIMIT must be positive")
+		}
+		if c.Calls.MaxParticipants < 2 {
+			return errors.New("CALLS_MAX_PARTICIPANTS must be at least 2")
+		}
+		if (c.Calls.ICEPortMin == 0) != (c.Calls.ICEPortMax == 0) {
+			return errors.New("CALLS_ICE_PORT_MIN and CALLS_ICE_PORT_MAX must be set together")
+		}
+		if c.Calls.ICEPortMin > 0 && c.Calls.ICEPortMin > c.Calls.ICEPortMax {
+			return errors.New("CALLS_ICE_PORT_MIN must not exceed CALLS_ICE_PORT_MAX")
+		}
+	}
+	if c.Translate.Timeout <= 0 {
+		return errors.New("TRANSLATE_TIMEOUT must be positive")
+	}
+	if c.Translate.CacheTTL <= 0 {
+		return errors.New("TRANSLATE_CACHE_TTL must be positive")
+	}
+	if c.Translate.RateLimitPerMin <= 0 {
+		return errors.New("TRANSLATE_RATE_LIMIT_PER_MIN must be positive")
+	}
 	return nil
 }
 
@@ -284,4 +361,16 @@ func getDurationEnv(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+// splitCSV turns a comma separated environment value into a trimmed list.
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }

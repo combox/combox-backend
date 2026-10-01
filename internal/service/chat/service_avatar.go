@@ -9,8 +9,37 @@ import (
 	"net/url"
 	"strings"
 
+	profilephotosvc "combox-backend/internal/service/profilephoto"
+
 	"github.com/google/uuid"
 )
+
+// ProfilePhotoRecorder archives every avatar object that gets written for a
+// chat, so the fullscreen gallery can replay the whole photo history.
+type ProfilePhotoRecorder interface {
+	Record(ctx context.Context, ownerKind, ownerID, objectKey string) error
+}
+
+// SetProfilePhotoRecorder wires the avatar history archive.
+func (s *Service) SetProfilePhotoRecorder(recorder ProfilePhotoRecorder) {
+	s.photoHistory = recorder
+}
+
+// recordProfilePhoto archives a freshly uploaded chat avatar object. The
+// avatar itself is already stored at this point, so a history failure never
+// fails the chat update that produced it. Clearing the avatar or leaving it
+// untouched never produces an object key, hence no record.
+func (s *Service) recordProfilePhoto(ctx context.Context, chatID, objectKey string) {
+	if s.photoHistory == nil {
+		return
+	}
+	chatID = strings.TrimSpace(chatID)
+	objectKey = strings.TrimSpace(objectKey)
+	if chatID == "" || objectKey == "" {
+		return
+	}
+	_ = s.photoHistory.Record(ctx, profilephotosvc.OwnerChat, chatID, objectKey)
+}
 
 func (s *Service) uploadAvatarDataURL(ctx context.Context, raw string) (string, error) {
 	if s.avatars == nil {

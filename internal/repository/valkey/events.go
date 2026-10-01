@@ -22,6 +22,10 @@ const EventTypeMessageDeleted = "message.deleted"
 const EventTypeMessageReaction = "message.reaction"
 const EventTypePresence = "presence.update"
 const EventTypeNotification = "notification"
+const EventTypeCallStarted = "call.started"
+const EventTypeCallEnded = "call.ended"
+const EventTypeProfileUpdate = "profile.update"
+const EventTypeChatUpdated = "chat.updated"
 
 type DeviceMessageCreatedEvent struct {
 	Type              string    `json:"type"`
@@ -43,6 +47,7 @@ type UserMessageCreatedEvent struct {
 	SenderUserID    string    `json:"sender_user_id"`
 	RecipientUserID string    `json:"recipient_user_id"`
 	CreatedAt       time.Time `json:"created_at"`
+	Preview         string    `json:"preview,omitempty"`
 }
 
 type MessageStatusEvent struct {
@@ -98,6 +103,9 @@ type PresenceEvent struct {
 	Online    bool      `json:"online"`
 	LastSeen  time.Time `json:"last_seen"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// LastSeenVisible carries the owner's "show last seen" setting. A nil value
+	// leaves the visibility the client already fetched over REST untouched.
+	LastSeenVisible *bool `json:"last_seen_visible,omitempty"`
 }
 
 type NotificationEvent struct {
@@ -107,6 +115,48 @@ type NotificationEvent struct {
 	Muted     bool      `json:"muted,omitempty"`
 	Payload   any       `json:"payload"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// CallEvent tells a chat member that a call started or ended so clients that
+// are not connected to the call signaling channel can ring / dismiss.
+type CallEvent struct {
+	Type      string    `json:"type"`
+	UserID    string    `json:"user_id"`
+	CallID    string    `json:"call_id"`
+	ChatID    string    `json:"chat_id"`
+	Kind      string    `json:"kind"`
+	E2EE      bool      `json:"e2ee,omitempty"`
+	StartedBy string    `json:"started_by"`
+	StartedAt time.Time `json:"started_at"`
+	Reason    string    `json:"reason,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ProfileUpdateEvent carries the public directory shape of a user whose own
+// profile fields (name, avatar, username) changed, so connected clients can
+// refresh cached names/avatars without a reload.
+type ProfileUpdateEvent struct {
+	Type            string  `json:"type"`
+	UserID          string  `json:"user_id"`
+	RecipientUserID string  `json:"recipient_user_id,omitempty"`
+	ID              string  `json:"id"`
+	Email           string  `json:"email"`
+	Username        string  `json:"username"`
+	FirstName       string  `json:"first_name"`
+	LastName        *string `json:"last_name,omitempty"`
+	BirthDate       *string `json:"birth_date,omitempty"`
+	AvatarDataURL   *string `json:"avatar_data_url,omitempty"`
+	AvatarGradient  *string `json:"avatar_gradient,omitempty"`
+}
+
+// ChatUpdatedEvent tells every member of a chat that shared chat fields
+// changed. Chat holds the chat list JSON shape.
+type ChatUpdatedEvent struct {
+	Type            string    `json:"type"`
+	ChatID          string    `json:"chat_id"`
+	RecipientUserID string    `json:"recipient_user_id,omitempty"`
+	Chat            any       `json:"chat"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type EventPublisher struct {
@@ -250,4 +300,67 @@ func (p *EventPublisher) PublishNotification(ctx context.Context, ev Notificatio
 		return fmt.Errorf("marshal event: %w", err)
 	}
 	return p.c.Client().Publish(ctx, userChannel(ev.UserID), payload).Err()
+}
+
+// PublishCallStarted informs a single chat member about a fresh call.
+func (p *EventPublisher) PublishCallStarted(ctx context.Context, ev CallEvent) error {
+	if p == nil || p.c == nil {
+		return nil
+	}
+	ev.Type = EventTypeCallStarted
+	return p.publishCall(ctx, ev)
+}
+
+// PublishCallEnded informs a single chat member that a call finished.
+func (p *EventPublisher) PublishCallEnded(ctx context.Context, ev CallEvent) error {
+	if p == nil || p.c == nil {
+		return nil
+	}
+	ev.Type = EventTypeCallEnded
+	return p.publishCall(ctx, ev)
+}
+
+func (p *EventPublisher) publishCall(ctx context.Context, ev CallEvent) error {
+	if ev.CreatedAt.IsZero() {
+		ev.CreatedAt = time.Now().UTC()
+	}
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("marshal event: %w", err)
+	}
+	return p.c.Client().Publish(ctx, userChannel(ev.UserID), payload).Err()
+}
+
+// PublishProfileUpdate delivers a refreshed public user shape to one recipient.
+func (p *EventPublisher) PublishProfileUpdate(ctx context.Context, ev ProfileUpdateEvent) error {
+	if p == nil || p.c == nil {
+		return nil
+	}
+	if ev.Type == "" {
+		ev.Type = EventTypeProfileUpdate
+	}
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("marshal event: %w", err)
+	}
+	recipientID := ev.RecipientUserID
+	if recipientID == "" {
+		recipientID = ev.UserID
+	}
+	return p.c.Client().Publish(ctx, userChannel(recipientID), payload).Err()
+}
+
+// PublishChatUpdated delivers a refreshed chat to one member.
+func (p *EventPublisher) PublishChatUpdated(ctx context.Context, ev ChatUpdatedEvent) error {
+	if p == nil || p.c == nil {
+		return nil
+	}
+	if ev.Type == "" {
+		ev.Type = EventTypeChatUpdated
+	}
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("marshal event: %w", err)
+	}
+	return p.c.Client().Publish(ctx, userChannel(ev.RecipientUserID), payload).Err()
 }

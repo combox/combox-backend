@@ -22,6 +22,27 @@ func notFound(messageKey string, cause error) *Error {
 	return &Error{Code: CodeNotFound, MessageKey: messageKey, Cause: cause}
 }
 
+func conflict(messageKey string) *Error {
+	return &Error{Code: CodeConflict, MessageKey: messageKey}
+}
+
+// alreadyExists reports a UNIQUE constraint rejection (409 already_exists),
+// e.g. a chat folder name the user already uses.
+func alreadyExists(messageKey string) *Error {
+	return &Error{Code: CodeAlreadyExists, MessageKey: messageKey}
+}
+
+// messagePreviewHead collapses a message body into a single short line used for
+// chat list previews and the desktop notification body.
+func messagePreviewHead(content string, limit int) string {
+	collapsed := strings.Join(strings.Fields(content), " ")
+	runes := []rune(collapsed)
+	if limit > 0 && len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return collapsed
+}
+
 func dedupeMembers(raw []string) []string {
 	seen := make(map[string]struct{}, len(raw))
 	out := make([]string, 0, len(raw))
@@ -87,6 +108,17 @@ func isGroupChannel(chatMeta Chat) bool {
 	return strings.TrimSpace(*chatMeta.ParentChatID) != ""
 }
 
+func isBotChat(chatMeta Chat) bool {
+	return strings.TrimSpace(strings.ToLower(chatMeta.Kind)) == "bot"
+}
+
+// isSelfServiceChat reports whether a chat is a private 1:1 conversation that
+// is owned by its members (direct chats and bot chats): leaving it means
+// removing only the caller's membership.
+func isSelfServiceChat(chatMeta Chat) bool {
+	return chatMeta.IsDirect || isBotChat(chatMeta)
+}
+
 func canHaveCommentThread(chatMeta Chat) bool {
 	kind := strings.TrimSpace(strings.ToLower(chatMeta.Kind))
 	switch kind {
@@ -131,6 +163,9 @@ func mapChatOrMessageRepoError(err error) error {
 	}
 	if errors.Is(err, ErrMessageNotFound) {
 		return notFound("error.message.not_found", err)
+	}
+	if errors.Is(err, ErrPollNotFound) {
+		return notFound("error.poll.not_found", err)
 	}
 	if errors.Is(err, ErrInvalidAttachments) {
 		return invalidArg("error.message.invalid_input")

@@ -3,24 +3,38 @@ package http
 import (
 	vkrepo "combox-backend/internal/repository/valkey"
 	authsvc "combox-backend/internal/service/auth"
+	privacysvc "combox-backend/internal/service/privacy"
 	"net/http"
 	"strings"
 	"time"
 )
 
 type profileUpdateRequest struct {
-	Username              *string `json:"username"`
-	FirstName             *string `json:"first_name"`
-	LastName              *string `json:"last_name"`
-	BirthDate             *string `json:"birth_date"`
-	AvatarDataURL         *string `json:"avatar_data_url"`
-	AvatarGradient        *string `json:"avatar_gradient"`
-	SessionIdleTTLSeconds *int64  `json:"session_idle_ttl_seconds"`
+	Username              *string               `json:"username"`
+	FirstName             *string               `json:"first_name"`
+	LastName              *string               `json:"last_name"`
+	BirthDate             *string               `json:"birth_date"`
+	AvatarDataURL         *string               `json:"avatar_data_url"`
+	AvatarGradient        *string               `json:"avatar_gradient"`
+	Bio                   *string               `json:"bio"`
+	PhoneNumber           *string               `json:"phone_number"`
+	NameColor             *string               `json:"name_color"`
+	PlaylistTitle         *string               `json:"playlist_title"`
+	PlaylistIsPublic      *bool                 `json:"playlist_is_public"`
+	SavedTracks           *[]authsvc.SavedTrack `json:"saved_tracks"`
+	SessionIdleTTLSeconds *int64                `json:"session_idle_ttl_seconds"`
 }
 
 type profilePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"`
+}
+
+func derefTracks(tracks *[]authsvc.SavedTrack) []authsvc.SavedTrack {
+	if tracks == nil {
+		return nil
+	}
+	return *tracks
 }
 
 func userIDFromPath(path string) (string, bool) {
@@ -78,16 +92,22 @@ func newProfileHandler(auth AuthService, i18n Translator, defaultLocale string) 
 		}
 
 		input := authsvc.UpdateProfileInput{
-			UserID:         userID,
-			Username:       authsvc.OptionalString{Set: req.Username != nil, Value: req.Username},
-			FirstName:      authsvc.OptionalString{Set: req.FirstName != nil, Value: req.FirstName},
-			LastName:       authsvc.OptionalString{Set: req.LastName != nil, Value: req.LastName},
-			BirthDate:      authsvc.OptionalString{Set: req.BirthDate != nil, Value: req.BirthDate},
-			AvatarDataURL:  authsvc.OptionalString{Set: req.AvatarDataURL != nil, Value: req.AvatarDataURL},
-			AvatarGradient: authsvc.OptionalString{Set: req.AvatarGradient != nil, Value: req.AvatarGradient},
+			UserID:           userID,
+			Username:         authsvc.OptionalString{Set: req.Username != nil, Value: req.Username},
+			FirstName:        authsvc.OptionalString{Set: req.FirstName != nil, Value: req.FirstName},
+			LastName:         authsvc.OptionalString{Set: req.LastName != nil, Value: req.LastName},
+			BirthDate:        authsvc.OptionalString{Set: req.BirthDate != nil, Value: req.BirthDate},
+			AvatarDataURL:    authsvc.OptionalString{Set: req.AvatarDataURL != nil, Value: req.AvatarDataURL},
+			AvatarGradient:   authsvc.OptionalString{Set: req.AvatarGradient != nil, Value: req.AvatarGradient},
+			Bio:              authsvc.OptionalString{Set: req.Bio != nil, Value: req.Bio},
+			PhoneNumber:      authsvc.OptionalString{Set: req.PhoneNumber != nil, Value: req.PhoneNumber},
+			NameColor:        authsvc.OptionalString{Set: req.NameColor != nil, Value: req.NameColor},
+			PlaylistTitle:    authsvc.OptionalString{Set: req.PlaylistTitle != nil, Value: req.PlaylistTitle},
+			PlaylistIsPublic: authsvc.OptionalBool{Set: req.PlaylistIsPublic != nil, Value: req.PlaylistIsPublic != nil && *req.PlaylistIsPublic},
+			SavedTracks:      authsvc.OptionalTracks{Set: req.SavedTracks != nil, Value: derefTracks(req.SavedTracks)},
 		}
 
-		hasProfileFields := req.Username != nil || req.FirstName != nil || req.LastName != nil || req.BirthDate != nil || req.AvatarDataURL != nil || req.AvatarGradient != nil
+		hasProfileFields := req.Username != nil || req.FirstName != nil || req.LastName != nil || req.BirthDate != nil || req.AvatarDataURL != nil || req.AvatarGradient != nil || req.Bio != nil || req.PhoneNumber != nil || req.NameColor != nil || req.PlaylistTitle != nil || req.PlaylistIsPublic != nil || req.SavedTracks != nil
 		var user authsvc.User
 		var err error
 		if hasProfileFields {
@@ -151,7 +171,7 @@ func newProfilePasswordHandler(auth AuthService, i18n Translator, defaultLocale 
 	}
 }
 
-func newUserByIDHandler(auth AuthService, i18n Translator, defaultLocale string) http.HandlerFunc {
+func newUserByIDHandler(auth AuthService, privacy PrivacyService, i18n Translator, defaultLocale string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w, r, i18n, defaultLocale)
@@ -171,6 +191,25 @@ func newUserByIDHandler(auth AuthService, i18n Translator, defaultLocale string)
 		if err != nil {
 			writeAuthServiceError(w, r, err, i18n, defaultLocale)
 			return
+		}
+		// A private playlist is nobody else's business: only its owner sees
+		// the tracks (the UI hides the block too, this is the server side).
+		if !user.PlaylistIsPublic && targetID != requesterID {
+			user.SavedTracks = []authsvc.SavedTrack{}
+		}
+		// Privacy: phone_number and bio are masked unless the owner's rule
+		// allows this viewer. One memo covers both evaluations. The profile
+		// payload carries no last_seen field, so last_seen has nothing to
+		// mask here (it is enforced on /presence and the WS presence frames).
+		if privacy != nil && targetID != requesterID {
+			ctx := privacysvc.WithMemo(r.Context())
+			empty := ""
+			if allowed, perr := privacy.Evaluate(ctx, requesterID, targetID, privacysvc.ParamPhoneNumber); perr != nil || !allowed {
+				user.PhoneNumber = &empty
+			}
+			if allowed, perr := privacy.Evaluate(ctx, requesterID, targetID, privacysvc.ParamBio); perr != nil || !allowed {
+				user.Bio = &empty
+			}
 		}
 		locale := requestLocale(r, defaultLocale)
 		writeJSON(w, http.StatusOK, map[string]any{

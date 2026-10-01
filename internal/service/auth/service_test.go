@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 )
@@ -145,16 +146,45 @@ func (m *memUserRepo) UpdatePasswordHash(_ context.Context, userID, passwordHash
 	return nil
 }
 
+func (m *memUserRepo) BindLegacyEmail(_ context.Context, userID, email string) (User, error) {
+	if m.usersByID == nil {
+		return User{}, ErrUserNotFound
+	}
+	user, ok := m.usersByID[userID]
+	if !ok {
+		return User{}, ErrUserNotFound
+	}
+	for _, existing := range m.usersByID {
+		if existing.ID != userID && existing.Email == email {
+			return User{}, ErrEmailTaken
+		}
+	}
+	delete(m.usersByLogin, user.Email)
+	user.Email = email
+	user.IsLegacyUnverified = false
+	m.usersByID[user.ID] = user
+	m.usersByLogin[user.Email] = user
+	m.usersByLogin[user.Username] = user
+	return user, nil
+}
+
 type memSessionRepo struct {
 	sessions map[string]Session
+	// seq gives every stored session a strictly increasing CreatedAt so the
+	// newest-first ordering of ListByUserID is deterministic.
+	seq int
 }
 
 func (m *memSessionRepo) Create(_ context.Context, input CreateSessionInput) (Session, error) {
+	m.seq++
 	session := Session{
 		ID:               input.ID,
 		UserID:           input.UserID,
 		RefreshTokenHash: input.RefreshTokenHash,
 		ExpiresAt:        input.ExpiresAt,
+		UserAgent:        input.UserAgent,
+		IPAddress:        input.IPAddress,
+		CreatedAt:        time.Unix(0, 0).UTC().Add(time.Duration(m.seq) * time.Second),
 	}
 	m.sessions[input.ID] = session
 	return session, nil
@@ -185,6 +215,46 @@ func (m *memSessionRepo) DeleteByID(_ context.Context, sessionID string) error {
 	}
 	delete(m.sessions, sessionID)
 	return nil
+}
+
+func (m *memSessionRepo) ListByUserID(_ context.Context, userID string) ([]Session, error) {
+	matches := []Session{}
+	for _, session := range m.sessions {
+		if session.UserID == userID {
+			matches = append(matches, session)
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].CreatedAt.Equal(matches[j].CreatedAt) {
+			return matches[i].ID > matches[j].ID
+		}
+		return matches[i].CreatedAt.After(matches[j].CreatedAt)
+	})
+	return matches, nil
+}
+
+func (m *memSessionRepo) DeleteByUserIDAndID(_ context.Context, userID, sessionID string) error {
+	session, ok := m.sessions[sessionID]
+	if !ok || session.UserID != userID {
+		return ErrSessionNotFound
+	}
+	delete(m.sessions, sessionID)
+	return nil
+}
+
+func (m *memSessionRepo) DeleteOthersByUserID(_ context.Context, userID, keepSessionID string) (int64, error) {
+	var revoked int64
+	for id, session := range m.sessions {
+		if session.UserID != userID {
+			continue
+		}
+		if keepSessionID != "" && id == keepSessionID {
+			continue
+		}
+		delete(m.sessions, id)
+		revoked++
+	}
+	return revoked, nil
 }
 
 func TestRegisterLoginRefreshLogoutFlow(t *testing.T) {

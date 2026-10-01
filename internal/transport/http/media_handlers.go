@@ -160,6 +160,46 @@ func attachmentDownloadURLFromPath(path string) (string, bool) {
 	return parts[0], true
 }
 
+// attachmentUserMetaFromPath resolves /media/attachments/{id}/meta.
+func attachmentUserMetaFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/media/attachments/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 2 {
+		return "", false
+	}
+	if parts[0] == "" || parts[1] != "meta" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+// attachmentPinFromPath resolves /media/attachments/{id}/pin.
+func attachmentPinFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/api/private/v1/media/attachments/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 2 {
+		return "", false
+	}
+	if parts[0] == "" || parts[1] != "pin" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+type userMetaRequest struct {
+	Meta map[string]any `json:"meta"`
+}
+
 func mediaSessionIDFromPath(path string) (string, bool) {
 	path = strings.TrimSpace(path)
 	const prefix = "/api/private/v1/media/sessions/"
@@ -363,6 +403,55 @@ func newMediaAttachmentByIDHandler(svc MediaService, i18n Translator, defaultLoc
 			return
 		}
 
+		if id, ok := attachmentUserMetaFromPath(r.URL.Path); ok {
+			if r.Method != http.MethodPost {
+				writeMethodNotAllowed(w, r, i18n, defaultLocale)
+				return
+			}
+			var req userMetaRequest
+			if err := decodeJSON(r, &req); err != nil {
+				writeAPIError(w, r, http.StatusBadRequest, "invalid_json", "error.request.invalid_json", nil, i18n, defaultLocale)
+				return
+			}
+			out, err := svc.SetUserMeta(r.Context(), mediasvc.SetUserMetaInput{
+				UserID:       userID,
+				AttachmentID: id,
+				Meta:         req.Meta,
+			})
+			if err != nil {
+				writeMediaServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+			locale := requestLocale(r, defaultLocale)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"message":     i18n.Translate(locale, "media.attachment.get.success"),
+				"attachment":  out.Attachment,
+				"url":         out.URL,
+				"preview_url": out.PreviewURL,
+			})
+			return
+		}
+
+		if id, ok := attachmentPinFromPath(r.URL.Path); ok {
+			if r.Method != http.MethodPost {
+				writeMethodNotAllowed(w, r, i18n, defaultLocale)
+				return
+			}
+			out, err := svc.PinAttachment(r.Context(), userID, id)
+			if err != nil {
+				writeMediaServiceError(w, r, err, i18n, defaultLocale)
+				return
+			}
+			locale := requestLocale(r, defaultLocale)
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"message":     i18n.Translate(locale, "media.attachment.create.success"),
+				"attachment":  out.Attachment,
+				"url":         out.URL,
+				"preview_url": out.PreviewURL,
+			})
+			return
+		}
+
 		id, ok := attachmentIDFromPath(r.URL.Path)
 		if !ok {
 			writeAPIError(w, r, http.StatusNotFound, "not_found", "error.request.not_found", nil, i18n, defaultLocale)
@@ -520,6 +609,10 @@ type MediaService interface {
 	PresignPart(ctx context.Context, requesterUserID, attachmentID, uploadID string, partNumber int) (mediasvc.PartURLOutput, error)
 	CompleteMultipart(ctx context.Context, requesterUserID, attachmentID, uploadID string, parts []mediasvc.CompletePart) (mediasvc.Attachment, error)
 	GetAttachment(ctx context.Context, requesterUserID, attachmentID string) (mediasvc.GetAttachmentOutput, error)
+	SetUserMeta(ctx context.Context, input mediasvc.SetUserMetaInput) (mediasvc.GetAttachmentOutput, error)
+	// PinAttachment stores an owned server-side copy of a readable attachment
+	// for the caller's personal library (playlist "Save" flow).
+	PinAttachment(ctx context.Context, requesterUserID, attachmentID string) (mediasvc.GetAttachmentOutput, error)
 	CreateDownloadURL(ctx context.Context, requesterUserID, attachmentID string) (mediasvc.AttachmentDownloadOutput, error)
 	CreateSession(ctx context.Context, input mediasvc.CreateSessionInput) (mediasvc.CreateSessionOutput, error)
 	PresignSessionPart(ctx context.Context, requesterUserID, sessionID string, partNumber int, contentType string) (mediasvc.PartURLOutput, error)

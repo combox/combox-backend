@@ -62,6 +62,10 @@ func (s *Service) EditMessage(ctx context.Context, input EditMessageInput) (Mess
 			}
 		}
 	}
+	s.applyForwardPrivacyToMessage(ctx, userID, &updated)
+	if err := s.attachPollToMessage(ctx, userID, &updated); err != nil {
+		return Message{}, err
+	}
 	return updated, nil
 }
 
@@ -178,6 +182,10 @@ func (s *Service) DeleteMessageByID(ctx context.Context, userID, messageID strin
 	} else if kind == "comment_thread" {
 		// Admins can delete foreign messages in threads.
 		allowForeign = true
+	} else if chatMeta.IsDirect {
+		// Telegram-like rule: either side of a 1-on-1 chat may delete any
+		// message in it. Membership is already enforced above.
+		allowForeign = true
 	}
 
 	if err := s.messages.SoftDeleteMessage(ctx, meta.ChatID, meta.ID, userID, allowForeign); err != nil {
@@ -211,13 +219,32 @@ func (s *Service) ForwardMessage(ctx context.Context, input ForwardMessageInput)
 		return Message{}, invalidArg("error.message.invalid_input")
 	}
 
-	if err := s.ensureChatMember(ctx, chatID, userID); err != nil {
+	sourceMeta, err := s.messages.GetMessageMeta(ctx, sourceMessageID)
+	if err != nil {
+		if errors.Is(err, ErrMessageNotFound) {
+			return Message{}, notFound("error.message.not_found", err)
+		}
+		return Message{}, internal(err)
+	}
+	sourceChatID := strings.TrimSpace(sourceMeta.ChatID)
+	if sourceChatID == "" {
+		sourceChatID = chatID
+	}
+
+	// The source message may live in another chat: the viewer must still be
+	// allowed to read it (membership, or a public channel).
+	if err := s.ensureChatReadableForViewer(ctx, sourceChatID, userID); err != nil {
 		return Message{}, err
 	}
 
 	chatMeta, err := s.chats.GetChat(ctx, chatID)
 	if err != nil {
 		return Message{}, mapChatOrMessageRepoError(err)
+	}
+	// Forwarding is posting: the destination must apply the same rules as a
+	// regular message (membership, channel send_permission, public-channel role).
+	if err := s.ensureCanPostIntoChat(ctx, chatMeta, userID); err != nil {
+		return Message{}, err
 	}
 	chatType, ok := normalizeChatType(chatMeta.Type)
 	if !ok {
@@ -242,11 +269,15 @@ func (s *Service) ForwardMessage(ctx context.Context, input ForwardMessageInput)
 					SenderUserID:    userID,
 					RecipientUserID: memberID,
 					CreatedAt:       created.CreatedAt,
+					Preview:         messagePreviewHead(created.Content, 200),
 				}
 				_ = s.publisher.PublishUserMessageCreated(ctx, ev)
 			}
 		}
 	}
+	// The response is serialised for the forwarder: hide the origin from them
+	// when its owner's forwarded_messages rule does not allow it.
+	s.applyForwardPrivacyToMessage(ctx, userID, &created)
 	return created, nil
 }
 

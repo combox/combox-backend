@@ -276,7 +276,7 @@ func NewChatRepository(client *Client) *ChatRepository {
 	return &ChatRepository{client: client}
 }
 
-func (r *ChatRepository) CreateChat(ctx context.Context, title string, memberIDs []string, creatorID string, chatType string) (chat.Chat, error) {
+func (r *ChatRepository) CreateChat(ctx context.Context, title string, memberIDs []string, creatorID string, chatType string, kind string) (chat.Chat, error) {
 	tx, err := r.client.pool.Begin(ctx)
 	if err != nil {
 		return chat.Chat{}, fmt.Errorf("begin tx: %w", err)
@@ -288,7 +288,7 @@ func (r *ChatRepository) CreateChat(ctx context.Context, title string, memberIDs
 	const insertChat = `
 		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind, parent_chat_id, channel_type)
 		VALUES ($1, $2, $3::uuid, $4, $5, NULL, NULL)
-		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, parent_chat_id::text, channel_type, bot_id::text, avatar_data_url, avatar_gradient, created_at
+		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, reactions_enabled, sign_messages, show_authors_profiles, auto_translate, slow_mode_seconds, discussion_chat_id::text, parent_chat_id::text, channel_type, bot_id::text, avatar_data_url, avatar_gradient, wallpaper_kind, wallpaper_value, description, icon_emoji, created_at
 	`
 
 	var created chat.Chat
@@ -297,8 +297,39 @@ func (r *ChatRepository) CreateChat(ctx context.Context, title string, memberIDs
 	if isDirect {
 		chatKind = "direct"
 	}
+	// An explicit "group" request always wins over the member-count heuristic;
+	// empty/"direct" keeps the legacy derivation above.
+	if strings.TrimSpace(strings.ToLower(kind)) == "group" {
+		isDirect = false
+		chatKind = "group"
+	}
 	err = tx.QueryRow(ctx, insertChat, title, isDirect, creatorID, chatType, chatKind).
-		Scan(&created.ID, &created.Title, &created.IsDirect, &created.Type, &created.Kind, &created.IsPublic, &created.PublicSlug, &created.CommentsEnabled, &created.ParentChatID, &created.ChannelType, &created.BotID, &created.AvatarURL, &created.AvatarBg, &created.CreatedAt)
+		Scan(
+			&created.ID,
+			&created.Title,
+			&created.IsDirect,
+			&created.Type,
+			&created.Kind,
+			&created.IsPublic,
+			&created.PublicSlug,
+			&created.CommentsEnabled,
+			&created.ReactionsEnabled,
+			&created.SignMessages,
+			&created.ShowAuthorsProfiles,
+			&created.AutoTranslate,
+			&created.SlowModeSeconds,
+			&created.DiscussionChatID,
+			&created.ParentChatID,
+			&created.ChannelType,
+			&created.BotID,
+			&created.AvatarURL,
+			&created.AvatarBg,
+			&created.WallpaperKind,
+			&created.WallpaperValue,
+			&created.Description,
+			&created.IconEmoji,
+			&created.CreatedAt,
+		)
 	if err != nil {
 		return chat.Chat{}, fmt.Errorf("insert chat: %w", err)
 	}
@@ -356,7 +387,7 @@ func (r *ChatRepository) CreateChannel(ctx context.Context, parentChatID, title,
 		FROM chats parent
 		WHERE parent.id = $1::uuid
 		  AND parent.chat_kind = 'group'
-		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, parent_chat_id::text, channel_type, topic_number, bot_id::text, avatar_data_url, avatar_gradient, created_at
+		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, reactions_enabled, sign_messages, show_authors_profiles, auto_translate, slow_mode_seconds, discussion_chat_id::text, parent_chat_id::text, channel_type, topic_number, bot_id::text, avatar_data_url, avatar_gradient, wallpaper_kind, wallpaper_value, description, icon_emoji, created_at
 	`
 
 	var created chat.Chat
@@ -377,12 +408,22 @@ func (r *ChatRepository) CreateChannel(ctx context.Context, parentChatID, title,
 		&created.IsPublic,
 		&created.PublicSlug,
 		&created.CommentsEnabled,
+		&created.ReactionsEnabled,
+		&created.SignMessages,
+		&created.ShowAuthorsProfiles,
+		&created.AutoTranslate,
+		&created.SlowModeSeconds,
+		&created.DiscussionChatID,
 		&created.ParentChatID,
 		&created.ChannelType,
 		&created.TopicNumber,
 		&created.BotID,
 		&created.AvatarURL,
 		&created.AvatarBg,
+		&created.WallpaperKind,
+		&created.WallpaperValue,
+		&created.Description,
+		&created.IconEmoji,
 		&created.CreatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -420,7 +461,7 @@ func (r *ChatRepository) CreatePublicChannel(ctx context.Context, title, publicS
 	const insertChat = `
 		INSERT INTO chats (title, is_direct, created_by, chat_type, chat_kind, is_public, public_slug, comments_enabled)
 		VALUES ($1, FALSE, $2::uuid, 'standard', 'standalone_channel', $3, $4, TRUE)
-		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, parent_chat_id::text, channel_type, topic_number, bot_id::text, avatar_data_url, avatar_gradient, created_at
+		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, reactions_enabled, sign_messages, show_authors_profiles, auto_translate, slow_mode_seconds, discussion_chat_id::text, parent_chat_id::text, channel_type, topic_number, bot_id::text, avatar_data_url, avatar_gradient, wallpaper_kind, wallpaper_value, description, icon_emoji, created_at
 	`
 
 	var created chat.Chat
@@ -437,12 +478,22 @@ func (r *ChatRepository) CreatePublicChannel(ctx context.Context, title, publicS
 		&created.IsPublic,
 		&created.PublicSlug,
 		&created.CommentsEnabled,
+		&created.ReactionsEnabled,
+		&created.SignMessages,
+		&created.ShowAuthorsProfiles,
+		&created.AutoTranslate,
+		&created.SlowModeSeconds,
+		&created.DiscussionChatID,
 		&created.ParentChatID,
 		&created.ChannelType,
 		&created.TopicNumber,
 		&created.BotID,
 		&created.AvatarURL,
 		&created.AvatarBg,
+		&created.WallpaperKind,
+		&created.WallpaperValue,
+		&created.Description,
+		&created.IconEmoji,
 		&created.CreatedAt,
 	); err != nil {
 		return chat.Chat{}, err
@@ -464,7 +515,7 @@ func (r *ChatRepository) CreatePublicChannel(ctx context.Context, title, publicS
 
 func (r *ChatRepository) FindDirectChatByMembers(ctx context.Context, userAID, userBID, chatType string) (chat.Chat, bool, error) {
 	const query = `
-		SELECT c.id::text, c.title, c.is_direct, c.chat_type, c.chat_kind, c.is_public, c.public_slug, c.comments_enabled, c.parent_chat_id::text, c.channel_type, c.bot_id::text, c.avatar_data_url, c.avatar_gradient, c.created_at
+		SELECT c.id::text, c.title, c.is_direct, c.chat_type, c.chat_kind, c.is_public, c.public_slug, c.comments_enabled, c.reactions_enabled, c.sign_messages, c.show_authors_profiles, c.auto_translate, c.slow_mode_seconds, c.discussion_chat_id::text, c.parent_chat_id::text, c.channel_type, c.bot_id::text, c.avatar_data_url, c.avatar_gradient, c.wallpaper_kind, c.wallpaper_value, c.description, c.icon_emoji, c.created_at
 		FROM chats c
 		JOIN chat_members cm_a ON cm_a.chat_id = c.id AND cm_a.user_id = $1::uuid
 		JOIN chat_members cm_b ON cm_b.chat_id = c.id AND cm_b.user_id = $2::uuid
@@ -481,7 +532,32 @@ func (r *ChatRepository) FindDirectChatByMembers(ctx context.Context, userAID, u
 	`
 	var found chat.Chat
 	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(userAID), strings.TrimSpace(userBID), strings.TrimSpace(chatType)).
-		Scan(&found.ID, &found.Title, &found.IsDirect, &found.Type, &found.Kind, &found.IsPublic, &found.PublicSlug, &found.CommentsEnabled, &found.ParentChatID, &found.ChannelType, &found.BotID, &found.AvatarURL, &found.AvatarBg, &found.CreatedAt); err != nil {
+		Scan(
+			&found.ID,
+			&found.Title,
+			&found.IsDirect,
+			&found.Type,
+			&found.Kind,
+			&found.IsPublic,
+			&found.PublicSlug,
+			&found.CommentsEnabled,
+			&found.ReactionsEnabled,
+			&found.SignMessages,
+			&found.ShowAuthorsProfiles,
+			&found.AutoTranslate,
+			&found.SlowModeSeconds,
+			&found.DiscussionChatID,
+			&found.ParentChatID,
+			&found.ChannelType,
+			&found.BotID,
+			&found.AvatarURL,
+			&found.AvatarBg,
+			&found.WallpaperKind,
+			&found.WallpaperValue,
+			&found.Description,
+			&found.IconEmoji,
+			&found.CreatedAt,
+		); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chat.Chat{}, false, nil
 		}
@@ -503,6 +579,12 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 		       c.is_public,
 		       c.public_slug,
 		       c.comments_enabled,
+		       c.reactions_enabled,
+		       c.sign_messages,
+		       c.show_authors_profiles,
+		       c.auto_translate,
+		       c.slow_mode_seconds,
+		       c.discussion_chat_id::text,
 		       c.parent_chat_id::text,
 		       c.channel_type,
 		       c.bot_id::text,
@@ -517,18 +599,33 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 		         )
 		         ELSE NULL
 		       END AS subscriber_count,
-		       CASE WHEN c.is_direct THEN peer.avatar_data_url ELSE c.avatar_data_url END,
-		       CASE WHEN c.is_direct THEN peer.avatar_gradient ELSE c.avatar_gradient END,
-		       CASE
-		         WHEN latest.content IS NULL THEN NULL
-		         WHEN c.is_direct THEN latest.content
-		         WHEN c.chat_kind = 'group' THEN CONCAT(latest.sender_name, ': ', latest.content)
-		         ELSE latest.content
-		       END AS last_message_preview,
-		       c.created_at
-		FROM chats c
-		INNER JOIN chat_members cm ON cm.chat_id = c.id
-		LEFT JOIN LATERAL (
+	       CASE WHEN c.is_direct THEN peer.avatar_data_url ELSE c.avatar_data_url END,
+	       CASE WHEN c.is_direct THEN peer.avatar_gradient ELSE c.avatar_gradient END,
+	       CASE
+	         WHEN latest.content IS NULL THEN NULL
+	         WHEN c.is_direct THEN latest.content
+	         WHEN c.chat_kind = 'group' THEN
+	           CASE
+	             WHEN TRIM(latest.content) = '' THEN latest.sender_name
+	             ELSE CONCAT(latest.sender_name, ': ', latest.content)
+	           END
+	         ELSE latest.content
+	       END AS last_message_preview,
+	       latest.sender_name AS last_message_sender_name,
+	       latest.created_at AS last_message_at,
+	       COALESCE(us.archived, FALSE) AS archived,
+	       COALESCE(us.pinned, FALSE) AS pinned,
+	       COALESCE(us.pin_scope, 'all') AS pin_scope,
+	       COALESCE(us.pin_order, 0) AS pin_order,
+	       c.wallpaper_kind,
+	       c.wallpaper_value,
+	       c.description,
+	       c.icon_emoji,
+	       c.created_at
+	FROM chats c
+	INNER JOIN chat_members cm ON cm.chat_id = c.id
+	LEFT JOIN chat_user_states us ON us.chat_id = c.id AND us.user_id = $1::uuid
+	LEFT JOIN LATERAL (
 			SELECT u.id, u.username, u.first_name, u.last_name, u.avatar_data_url, u.avatar_gradient
 			FROM chat_members cm_peer
 			INNER JOIN users u ON u.id = cm_peer.user_id
@@ -540,11 +637,13 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 		LEFT JOIN LATERAL (
 			SELECT
 				m.content,
+				m.created_at,
 				COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), u.username, 'Unknown') AS sender_name
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
 			WHERE m.chat_id = c.id
 			  AND m.deleted_at IS NULL
+			  AND (us.history_cleared_at IS NULL OR m.created_at > us.history_cleared_at)
 			ORDER BY m.created_at DESC
 			LIMIT 1
 		) latest ON TRUE
@@ -552,10 +651,18 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 		  AND cm.role <> 'banned'
 		  -- Exclude group "topics" (chat_kind='channel' with a parent group) from the main chat list,
 		  -- but keep top-level/public channels.
-		  AND NOT (c.chat_kind = 'channel' AND c.parent_chat_id IS NOT NULL)
+		AND NOT (c.chat_kind = 'channel' AND c.parent_chat_id IS NOT NULL)
 		  AND c.chat_kind <> 'comment_thread'
 		  AND (c.is_direct = FALSE OR peer.id IS NOT NULL)
-		ORDER BY c.created_at DESC
+		-- R16: sort by real last activity, not creation. Migrated chats were
+		-- created "now" (2026-09-30) while their messages are Feb-Apr 2026, so
+		-- ORDER BY c.created_at pinned them on top. COALESCE keeps the old
+		-- behaviour for empty chats (no latest -> fall back to creation, so a
+		-- brand-new empty chat still surfaces on top) while active chats sort
+		-- by their latest message. Plain "latest ... NULLS LAST" would sink
+		-- every new empty chat to the bottom, hiding it — that is why COALESCE
+		-- is used instead.
+		ORDER BY COALESCE(latest.created_at, c.created_at) DESC, c.created_at DESC
 	`
 	rows, err := r.client.pool.Query(ctx, query, userID)
 	if err != nil {
@@ -575,6 +682,12 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 			&item.IsPublic,
 			&item.PublicSlug,
 			&item.CommentsEnabled,
+			&item.ReactionsEnabled,
+			&item.SignMessages,
+			&item.ShowAuthorsProfiles,
+			&item.AutoTranslate,
+			&item.SlowModeSeconds,
+			&item.DiscussionChatID,
 			&item.ParentChatID,
 			&item.ChannelType,
 			&item.BotID,
@@ -584,6 +697,16 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 			&item.AvatarURL,
 			&item.AvatarBg,
 			&item.LastMessagePreview,
+			&item.LastMessageSenderName,
+			&item.LastMessageAt,
+			&item.Archived,
+			&item.Pinned,
+			&item.PinScope,
+			&item.PinOrder,
+			&item.WallpaperKind,
+			&item.WallpaperValue,
+			&item.Description,
+			&item.IconEmoji,
 			&item.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -594,6 +717,156 @@ func (r *ChatRepository) ListChatsByUser(ctx context.Context, userID string) ([]
 		return nil, err
 	}
 	return out, nil
+}
+
+func (r *ChatRepository) GetChatUserState(ctx context.Context, userID, chatID string) (chat.ChatUserState, error) {
+	const query = `
+		SELECT archived, pinned, COALESCE(pin_scope, 'all'), COALESCE(pin_order, 0), history_cleared_at
+		FROM chat_user_states
+		WHERE chat_id = $1::uuid
+		  AND user_id = $2::uuid
+		LIMIT 1
+	`
+	var state chat.ChatUserState
+	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(userID)).Scan(
+		&state.Archived,
+		&state.Pinned,
+		&state.PinScope,
+		&state.PinOrder,
+		&state.HistoryClearedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return chat.ChatUserState{}, nil
+		}
+		return chat.ChatUserState{}, err
+	}
+	return state, nil
+}
+
+func (r *ChatRepository) ListChatUserStates(ctx context.Context, userID string) (map[string]chat.ChatUserState, error) {
+	const query = `
+		SELECT chat_id::text, archived, pinned, COALESCE(pin_scope, 'all'), COALESCE(pin_order, 0), history_cleared_at
+		FROM chat_user_states
+		WHERE user_id = $1::uuid
+	`
+	rows, err := r.client.pool.Query(ctx, query, strings.TrimSpace(userID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]chat.ChatUserState)
+	for rows.Next() {
+		var chatID string
+		var state chat.ChatUserState
+		if err := rows.Scan(&chatID, &state.Archived, &state.Pinned, &state.PinScope, &state.PinOrder, &state.HistoryClearedAt); err != nil {
+			return nil, err
+		}
+		out[chatID] = state
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (r *ChatRepository) SetChatArchived(ctx context.Context, userID, chatID string, archived bool) error {
+	const query = `
+		INSERT INTO chat_user_states (chat_id, user_id, archived)
+		VALUES ($1::uuid, $2::uuid, $3::boolean)
+		ON CONFLICT (chat_id, user_id)
+		DO UPDATE SET archived = EXCLUDED.archived, updated_at = NOW()
+	`
+	_, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(userID), archived)
+	return err
+}
+
+func (r *ChatRepository) SetChatPinned(ctx context.Context, userID, chatID string, pinned bool, pinScope string, pinOrder int64) error {
+	scope := strings.TrimSpace(pinScope)
+	if scope == "" {
+		scope = "all"
+	}
+	const query = `
+		INSERT INTO chat_user_states (chat_id, user_id, pinned, pin_scope, pin_order)
+		VALUES ($1::uuid, $2::uuid, $3::boolean, $4::text, $5::bigint)
+		ON CONFLICT (chat_id, user_id)
+		DO UPDATE SET pinned = EXCLUDED.pinned,
+		              pin_scope = EXCLUDED.pin_scope,
+		              pin_order = EXCLUDED.pin_order,
+		              updated_at = NOW()
+	`
+	_, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(userID), pinned, scope, pinOrder)
+	return err
+}
+
+func (r *ChatRepository) SetChatPinnedMessage(ctx context.Context, chatID, messageID string) error {
+	const query = `
+		UPDATE chats
+		SET pinned_message_id = NULLIF($2::text, '')::uuid,
+		    updated_at = NOW()
+		WHERE id = $1::uuid
+	`
+	_, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(messageID))
+	return err
+}
+
+func (r *ChatRepository) GetChatPinnedMessageID(ctx context.Context, chatID string) (string, error) {
+	const query = `
+		SELECT pinned_message_id::text
+		FROM chats
+		WHERE id = $1::uuid
+		LIMIT 1
+	`
+	var pinnedID *string
+	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(chatID)).Scan(&pinnedID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", chat.ErrChatNotFound
+		}
+		return "", err
+	}
+	return strings.TrimSpace(derefString(pinnedID)), nil
+}
+
+// SetChatWallpaper stores the chat background. kind "none" clears the value.
+func (r *ChatRepository) SetChatWallpaper(ctx context.Context, chatID, wallpaperKind, wallpaperValue string) error {
+	kind := strings.TrimSpace(strings.ToLower(wallpaperKind))
+	value := strings.TrimSpace(wallpaperValue)
+	if kind == "" {
+		kind = chat.WallpaperKindNone
+	}
+	if kind == chat.WallpaperKindNone {
+		value = ""
+	}
+	const query = `
+		UPDATE chats
+		SET wallpaper_kind = $2,
+		    wallpaper_value = NULLIF($3::text, ''),
+		    updated_at = NOW()
+		WHERE id = $1::uuid
+	`
+	_, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(chatID), kind, value)
+	return err
+}
+
+func (r *ChatRepository) SetChatHistoryCleared(ctx context.Context, userID, chatID string, at time.Time) error {
+	const query = `
+		INSERT INTO chat_user_states (chat_id, user_id, history_cleared_at)
+		VALUES ($1::uuid, $2::uuid, $3::timestamptz)
+		ON CONFLICT (chat_id, user_id)
+		DO UPDATE SET history_cleared_at = EXCLUDED.history_cleared_at, updated_at = NOW()
+	`
+	_, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(userID), at)
+	return err
+}
+
+func (r *ChatRepository) DeleteChatUserState(ctx context.Context, userID, chatID string) error {
+	const query = `
+		DELETE FROM chat_user_states
+		WHERE chat_id = $1::uuid
+		  AND user_id = $2::uuid
+	`
+	_, err := r.client.pool.Exec(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(userID))
+	return err
 }
 
 func (r *ChatRepository) DeleteChannel(ctx context.Context, parentChatID, channelChatID string) error {
@@ -660,13 +933,80 @@ func (r *ChatRepository) DeleteChat(ctx context.Context, chatID string) error {
 
 func (r *ChatRepository) GetChat(ctx context.Context, chatID string) (chat.Chat, error) {
 	const query = `
-		SELECT id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, parent_chat_id::text, channel_type, topic_number, bot_id::text, avatar_data_url, avatar_gradient, created_at
-		FROM chats
-		WHERE id = $1::uuid
+		SELECT c.id::text,
+		       c.title,
+		       c.is_direct,
+		       c.chat_type,
+		       c.chat_kind,
+		       c.is_public,
+		       c.public_slug,
+		       c.comments_enabled,
+		       c.reactions_enabled,
+		       c.sign_messages,
+		       c.show_authors_profiles,
+		       c.auto_translate,
+		       c.slow_mode_seconds,
+		       c.discussion_chat_id::text,
+		       c.send_permission,
+		       c.parent_chat_id::text,
+		       c.channel_type,
+		       c.topic_number,
+		       c.bot_id::text,
+		       c.avatar_data_url,
+		       c.avatar_gradient,
+		       latest.sender_name,
+		       latest.created_at,
+		       c.wallpaper_kind,
+		       c.wallpaper_value,
+		       c.description,
+		       c.icon_emoji,
+		       c.created_at
+		FROM chats c
+		LEFT JOIN LATERAL (
+			SELECT
+				m.created_at,
+				COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), u.username, 'Unknown') AS sender_name
+			FROM messages m
+			LEFT JOIN users u ON u.id = m.user_id
+			WHERE m.chat_id = c.id
+			  AND m.deleted_at IS NULL
+			ORDER BY m.created_at DESC
+			LIMIT 1
+		) latest ON TRUE
+		WHERE c.id = $1::uuid
 		LIMIT 1
 	`
 	var item chat.Chat
-	if err := r.client.pool.QueryRow(ctx, query, chatID).Scan(&item.ID, &item.Title, &item.IsDirect, &item.Type, &item.Kind, &item.IsPublic, &item.PublicSlug, &item.CommentsEnabled, &item.ParentChatID, &item.ChannelType, &item.TopicNumber, &item.BotID, &item.AvatarURL, &item.AvatarBg, &item.CreatedAt); err != nil {
+	if err := r.client.pool.QueryRow(ctx, query, chatID).Scan(
+		&item.ID,
+		&item.Title,
+		&item.IsDirect,
+		&item.Type,
+		&item.Kind,
+		&item.IsPublic,
+		&item.PublicSlug,
+		&item.CommentsEnabled,
+		&item.ReactionsEnabled,
+		&item.SignMessages,
+		&item.ShowAuthorsProfiles,
+		&item.AutoTranslate,
+		&item.SlowModeSeconds,
+		&item.DiscussionChatID,
+		&item.SendPermission,
+		&item.ParentChatID,
+		&item.ChannelType,
+		&item.TopicNumber,
+		&item.BotID,
+		&item.AvatarURL,
+		&item.AvatarBg,
+		&item.LastMessageSenderName,
+		&item.LastMessageAt,
+		&item.WallpaperKind,
+		&item.WallpaperValue,
+		&item.Description,
+		&item.IconEmoji,
+		&item.CreatedAt,
+	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chat.Chat{}, chat.ErrChatNotFound
 		}
@@ -700,6 +1040,43 @@ func (r *ChatRepository) UpdateChat(ctx context.Context, input chat.UpdateChatIn
 		args = append(args, input.CommentsEnabled.Value)
 		arg++
 	}
+	if input.ReactionsEnabled.Set {
+		setClauses = append(setClauses, fmt.Sprintf("reactions_enabled = $%d", arg))
+		args = append(args, input.ReactionsEnabled.Value)
+		arg++
+	}
+	if input.SignMessages.Set {
+		setClauses = append(setClauses, fmt.Sprintf("sign_messages = $%d", arg))
+		args = append(args, input.SignMessages.Value)
+		arg++
+	}
+	if input.ShowAuthorsProfiles.Set {
+		setClauses = append(setClauses, fmt.Sprintf("show_authors_profiles = $%d", arg))
+		args = append(args, input.ShowAuthorsProfiles.Value)
+		arg++
+	}
+	if input.AutoTranslate.Set {
+		setClauses = append(setClauses, fmt.Sprintf("auto_translate = $%d", arg))
+		args = append(args, input.AutoTranslate.Value)
+		arg++
+	}
+	if input.SlowModeSeconds.Set {
+		setClauses = append(setClauses, fmt.Sprintf("slow_mode_seconds = $%d", arg))
+		args = append(args, input.SlowModeSeconds.Value)
+		arg++
+	}
+	if input.DiscussionChatID.Set {
+		// NULL clears the link; pgx sends a nil interface as SQL NULL.
+		var discussionChatID any
+		if input.DiscussionChatID.Value != nil {
+			if value := strings.TrimSpace(*input.DiscussionChatID.Value); value != "" {
+				discussionChatID = value
+			}
+		}
+		setClauses = append(setClauses, fmt.Sprintf("discussion_chat_id = $%d::uuid", arg))
+		args = append(args, discussionChatID)
+		arg++
+	}
 	if input.IsPublic.Set {
 		setClauses = append(setClauses, fmt.Sprintf("is_public = $%d", arg))
 		args = append(args, input.IsPublic.Value)
@@ -710,6 +1087,31 @@ func (r *ChatRepository) UpdateChat(ctx context.Context, input chat.UpdateChatIn
 		args = append(args, input.PublicSlug.Value)
 		arg++
 	}
+	if input.SendPermission.Set {
+		setClauses = append(setClauses, fmt.Sprintf("send_permission = $%d", arg))
+		args = append(args, input.SendPermission.Value)
+		arg++
+	}
+	if input.Description.Set {
+		setClauses = append(setClauses, fmt.Sprintf("description = $%d", arg))
+		args = append(args, derefString(input.Description.Value))
+		arg++
+	}
+	if input.IconEmoji.Set {
+		setClauses = append(setClauses, fmt.Sprintf("icon_emoji = $%d", arg))
+		args = append(args, derefString(input.IconEmoji.Value))
+		arg++
+	}
+	if input.ChannelType.Set {
+		// NULL drops the type back to "no type"; pgx sends nil as SQL NULL.
+		var channelType any
+		if value := strings.TrimSpace(derefString(input.ChannelType.Value)); value != "" {
+			channelType = value
+		}
+		setClauses = append(setClauses, fmt.Sprintf("channel_type = $%d", arg))
+		args = append(args, channelType)
+		arg++
+	}
 	if len(setClauses) == 0 {
 		return chat.Chat{}, chat.ErrChatNotFound
 	}
@@ -718,7 +1120,7 @@ func (r *ChatRepository) UpdateChat(ctx context.Context, input chat.UpdateChatIn
 		UPDATE chats
 		SET %s, updated_at = NOW()
 		WHERE id = $%d::uuid
-		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, parent_chat_id::text, channel_type, bot_id::text, avatar_data_url, avatar_gradient, created_at
+		RETURNING id::text, title, is_direct, chat_type, chat_kind, is_public, public_slug, comments_enabled, reactions_enabled, sign_messages, show_authors_profiles, auto_translate, slow_mode_seconds, discussion_chat_id::text, send_permission, parent_chat_id::text, channel_type, bot_id::text, avatar_data_url, avatar_gradient, wallpaper_kind, wallpaper_value, description, icon_emoji, created_at
 	`, strings.Join(setClauses, ", "), arg)
 	args = append(args, strings.TrimSpace(input.ChatID))
 
@@ -732,11 +1134,22 @@ func (r *ChatRepository) UpdateChat(ctx context.Context, input chat.UpdateChatIn
 		&item.IsPublic,
 		&item.PublicSlug,
 		&item.CommentsEnabled,
+		&item.ReactionsEnabled,
+		&item.SignMessages,
+		&item.ShowAuthorsProfiles,
+		&item.AutoTranslate,
+		&item.SlowModeSeconds,
+		&item.DiscussionChatID,
+		&item.SendPermission,
 		&item.ParentChatID,
 		&item.ChannelType,
 		&item.BotID,
 		&item.AvatarURL,
 		&item.AvatarBg,
+		&item.WallpaperKind,
+		&item.WallpaperValue,
+		&item.Description,
+		&item.IconEmoji,
 		&item.CreatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -955,6 +1368,13 @@ func (r *ChatRepository) ListChannelsByParent(ctx context.Context, parentChatID,
 		       c.is_public,
 		       c.public_slug,
 		       c.comments_enabled,
+		       c.reactions_enabled,
+		       c.sign_messages,
+		       c.show_authors_profiles,
+		       c.auto_translate,
+		       c.slow_mode_seconds,
+		       c.discussion_chat_id::text,
+		       c.send_permission,
 		       c.parent_chat_id::text,
 		       c.channel_type,
 		       c.topic_number,
@@ -963,13 +1383,24 @@ func (r *ChatRepository) ListChannelsByParent(ctx context.Context, parentChatID,
 		       NULL::int AS subscriber_count,
 		       c.avatar_data_url,
 		       c.avatar_gradient,
+		       parent.title,
 		       latest.content,
+		       latest.sender_name,
+		       latest.created_at,
+		       c.wallpaper_kind,
+		       c.wallpaper_value,
+		       c.description,
+		       c.icon_emoji,
 		       c.created_at
 		FROM chats c
 		INNER JOIN chat_members cm ON cm.chat_id = c.id
+		LEFT JOIN chats parent ON parent.id = c.parent_chat_id
 		LEFT JOIN LATERAL (
-			SELECT m.content
+			SELECT m.content,
+			       m.created_at,
+			       COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), u.username, 'Unknown') AS sender_name
 			FROM messages m
+			LEFT JOIN users u ON u.id = m.user_id
 			WHERE m.chat_id = c.id
 			  AND m.deleted_at IS NULL
 			ORDER BY m.created_at DESC
@@ -999,6 +1430,13 @@ func (r *ChatRepository) ListChannelsByParent(ctx context.Context, parentChatID,
 			&item.IsPublic,
 			&item.PublicSlug,
 			&item.CommentsEnabled,
+			&item.ReactionsEnabled,
+			&item.SignMessages,
+			&item.ShowAuthorsProfiles,
+			&item.AutoTranslate,
+			&item.SlowModeSeconds,
+			&item.DiscussionChatID,
+			&item.SendPermission,
 			&item.ParentChatID,
 			&item.ChannelType,
 			&item.TopicNumber,
@@ -1007,7 +1445,14 @@ func (r *ChatRepository) ListChannelsByParent(ctx context.Context, parentChatID,
 			&item.SubscriberCount,
 			&item.AvatarURL,
 			&item.AvatarBg,
+			&item.ParentTitle,
 			&item.LastMessagePreview,
+			&item.LastMessageSenderName,
+			&item.LastMessageAt,
+			&item.WallpaperKind,
+			&item.WallpaperValue,
+			&item.Description,
+			&item.IconEmoji,
 			&item.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -1036,6 +1481,20 @@ func (r *ChatRepository) GetChatMemberRole(ctx context.Context, chatID, userID s
 		return "", err
 	}
 	return strings.TrimSpace(role), nil
+}
+
+func (r *ChatRepository) CountChannelSubscribers(ctx context.Context, chatID string) (int, error) {
+	const query = `
+		SELECT COUNT(*)
+		FROM chat_members
+		WHERE chat_id = $1::uuid
+		  AND role <> 'banned'
+	`
+	var n int
+	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(chatID)).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 type MessageRepository struct {
@@ -1143,17 +1602,18 @@ func (r *MessageRepository) CreateForwardedMessage(ctx context.Context, chatID, 
 	// Snapshot forward: copy the current content into a new message row.
 	// Forwarded message must be a standard (non-e2e) message.
 	const selectQuery = `
-		SELECT content, is_e2e
-		FROM messages
-		WHERE id = $1::uuid
-		  AND chat_id = $2::uuid
-		  AND deleted_at IS NULL
+		SELECT content, is_e2e,
+		       COALESCE(NULLIF(m.forward_origin_user_id::text, ''), m.user_id::text)
+		FROM messages m
+		WHERE m.id = $1::uuid
+		  AND m.deleted_at IS NULL
 		LIMIT 1
 	`
 
 	var content *string
 	var isE2E bool
-	if err := r.client.pool.QueryRow(ctx, selectQuery, sourceMessageID, chatID).Scan(&content, &isE2E); err != nil {
+	var originUserID *string
+	if err := r.client.pool.QueryRow(ctx, selectQuery, sourceMessageID).Scan(&content, &isE2E, &originUserID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chat.Message{}, chat.ErrMessageNotFound
 		}
@@ -1163,7 +1623,26 @@ func (r *MessageRepository) CreateForwardedMessage(ctx context.Context, chatID, 
 		return chat.Message{}, chat.ErrMessageNotFound
 	}
 
-	return r.CreateMessage(ctx, chatID, userID, *content, "")
+	created, err := r.CreateMessage(ctx, chatID, userID, *content, "")
+	if err != nil {
+		return chat.Message{}, err
+	}
+
+	origin := strings.TrimSpace(derefString(originUserID))
+	if origin == "" {
+		return created, nil
+	}
+	const originQuery = `
+		UPDATE messages
+		SET forward_origin_user_id = $1::uuid
+		WHERE id = $2::uuid
+		  AND chat_id = $3::uuid
+	`
+	if _, err := r.client.pool.Exec(ctx, originQuery, origin, created.ID, created.ChatID); err != nil {
+		return chat.Message{}, err
+	}
+	created.ForwardOriginUserID = &origin
+	return created, nil
 }
 
 func (r *MessageRepository) UpdateMessageContent(ctx context.Context, chatID, messageID, editorUserID, newContent string, attachmentIDs []string, allowForeign bool) (chat.Message, error) {
@@ -1400,19 +1879,20 @@ func (r *MessageRepository) CreateMessageE2EWithAttachments(ctx context.Context,
 	return msg, nil
 }
 
-func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, limit int, cursor string) (chat.MessagePage, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 500 {
-		limit = 500
-	}
-	const baseQuery = `
+func (r *MessageRepository) GetMessageByID(ctx context.Context, chatID, messageID string) (chat.Message, error) {
+	const query = `
 		SELECT m.id::text,
 		       m.chat_id::text,
 		       COALESCE(m.user_id::text, ''),
 		       m.sender_bot_id::text,
 		       m.content,
+		       m.forward_origin_user_id::text,
+		       (
+		         SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), u.username, 'Unknown')
+		         FROM users u
+		         WHERE u.id = m.forward_origin_user_id
+		         LIMIT 1
+		       ) AS forward_origin_name,
 		       m.reply_to_message_id::text,
 		       (
 		         SELECT rm.content
@@ -1436,7 +1916,102 @@ func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, lim
 		       COALESCE((
 		         SELECT json_agg(row_to_json(x))
 		         FROM (
-		           SELECT mr.emoji, COUNT(*)::int AS count, array_agg(mr.user_id::text ORDER BY mr.updated_at DESC) AS user_ids
+		           SELECT mr.emoji, COUNT(*)::int AS count, array_agg(mr.user_id::text ORDER BY mr.updated_at DESC) AS user_ids,
+		           json_agg(json_build_object('user_id', mr.user_id::text, 'at', to_char(mr.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) ORDER BY mr.updated_at DESC) AS actors
+		           FROM message_reactions mr
+		           WHERE mr.message_id = m.id
+		           GROUP BY mr.emoji
+		           ORDER BY max(mr.updated_at) DESC
+		         ) AS x
+		       ), '[]'::json) AS reactions_json
+		FROM messages m
+		WHERE m.chat_id = $1::uuid
+		  AND m.id = $2::uuid
+		  AND m.deleted_at IS NULL
+		LIMIT 1
+	`
+
+	var item chat.Message
+	var senderDeviceID *string
+	var reactionsJSON []byte
+	err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(chatID), strings.TrimSpace(messageID)).Scan(
+		&item.ID,
+		&item.ChatID,
+		&item.UserID,
+		&item.SenderBotID,
+		&item.Content,
+		&item.ForwardOriginUserID,
+		&item.ForwardOriginName,
+		&item.ReplyToMessageID,
+		&item.ReplyToMessagePreview,
+		&item.ReplyToMessageSenderName,
+		&item.IsE2E,
+		&senderDeviceID,
+		&item.CreatedAt,
+		&item.EditedAt,
+		&reactionsJSON,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return chat.Message{}, chat.ErrMessageNotFound
+		}
+		return chat.Message{}, err
+	}
+	item.Reactions = parseMessageReactionsJSON(reactionsJSON)
+	if strings.TrimSpace(item.UserID) == "" && item.SenderBotID != nil {
+		item.UserID = "bot:" + strings.TrimSpace(*item.SenderBotID)
+	}
+	if item.IsE2E {
+		item.E2E = &chat.E2EPayload{SenderDeviceID: strings.TrimSpace(derefString(senderDeviceID))}
+	}
+	return item, nil
+}
+
+func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, limit int, cursor string) (chat.MessagePage, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	const baseQuery = `
+		SELECT m.id::text,
+		       m.chat_id::text,
+		       COALESCE(m.user_id::text, ''),
+		       m.sender_bot_id::text,
+		       m.content,
+		       m.forward_origin_user_id::text,
+		       (
+		         SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), u.username, 'Unknown')
+		         FROM users u
+		         WHERE u.id = m.forward_origin_user_id
+		         LIMIT 1
+		       ) AS forward_origin_name,
+		       m.reply_to_message_id::text,
+		       (
+		         SELECT rm.content
+		         FROM messages rm
+		         WHERE rm.id = m.reply_to_message_id
+		           AND rm.deleted_at IS NULL
+		         LIMIT 1
+		       ) AS reply_preview,
+		       (
+		         SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), u.username, 'Unknown')
+		         FROM messages rm
+		         INNER JOIN users u ON u.id = rm.user_id
+		         WHERE rm.id = m.reply_to_message_id
+		           AND rm.deleted_at IS NULL
+		         LIMIT 1
+		       ) AS reply_sender_name,
+		       m.is_e2e,
+		       m.e2e_sender_device_id::text,
+		       m.created_at,
+		       m.edited_at,
+		       COALESCE((
+		         SELECT json_agg(row_to_json(x))
+		         FROM (
+		           SELECT mr.emoji, COUNT(*)::int AS count, array_agg(mr.user_id::text ORDER BY mr.updated_at DESC) AS user_ids,
+		           json_agg(json_build_object('user_id', mr.user_id::text, 'at', to_char(mr.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) ORDER BY mr.updated_at DESC) AS actors
 		           FROM message_reactions mr
 		           WHERE mr.message_id = m.id
 		           GROUP BY mr.emoji
@@ -1481,6 +2056,8 @@ func (r *MessageRepository) ListMessages(ctx context.Context, chatID string, lim
 			&item.UserID,
 			&item.SenderBotID,
 			&item.Content,
+			&item.ForwardOriginUserID,
+			&item.ForwardOriginName,
 			&item.ReplyToMessageID,
 			&item.ReplyToMessagePreview,
 			&item.ReplyToMessageSenderName,
@@ -1522,6 +2099,13 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 	}
 	const baseQuery = `
 		SELECT m.id::text, m.chat_id::text, COALESCE(m.user_id::text, ''), m.sender_bot_id::text, m.content,
+		       m.forward_origin_user_id::text,
+		       (
+		         SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), u.username, 'Unknown')
+		         FROM users u
+		         WHERE u.id = m.forward_origin_user_id
+		         LIMIT 1
+		       ) AS forward_origin_name,
 		       m.reply_to_message_id::text,
 		       (
 		         SELECT rm.content
@@ -1544,7 +2128,8 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 		       COALESCE((
 		         SELECT json_agg(row_to_json(x))
 		         FROM (
-		           SELECT mr.emoji, COUNT(*)::int AS count, array_agg(mr.user_id::text ORDER BY mr.updated_at DESC) AS user_ids
+		           SELECT mr.emoji, COUNT(*)::int AS count, array_agg(mr.user_id::text ORDER BY mr.updated_at DESC) AS user_ids,
+		           json_agg(json_build_object('user_id', mr.user_id::text, 'at', to_char(mr.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) ORDER BY mr.updated_at DESC) AS actors
 		           FROM message_reactions mr
 		           WHERE mr.message_id = m.id
 		           GROUP BY mr.emoji
@@ -1598,6 +2183,8 @@ func (r *MessageRepository) ListMessagesForDevice(ctx context.Context, chatID, d
 			&item.UserID,
 			&senderBotID,
 			&item.Content,
+			&item.ForwardOriginUserID,
+			&item.ForwardOriginName,
 			&item.ReplyToMessageID,
 			&replyPreview,
 			&replySenderName,
@@ -1739,7 +2326,8 @@ func (r *MessageRepository) ToggleMessageReaction(ctx context.Context, chatID, m
 		SELECT COALESCE((
 		  SELECT json_agg(row_to_json(x))
 		  FROM (
-		    SELECT mr.emoji, COUNT(*)::int AS count, array_agg(mr.user_id::text ORDER BY mr.updated_at DESC) AS user_ids
+		    SELECT mr.emoji, COUNT(*)::int AS count, array_agg(mr.user_id::text ORDER BY mr.updated_at DESC) AS user_ids,
+		           json_agg(json_build_object('user_id', mr.user_id::text, 'at', to_char(mr.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) ORDER BY mr.updated_at DESC) AS actors
 		    FROM message_reactions mr
 		    WHERE mr.message_id = $1::uuid
 		    GROUP BY mr.emoji
@@ -1752,4 +2340,76 @@ func (r *MessageRepository) ToggleMessageReaction(ctx context.Context, chatID, m
 		return nil, "", err
 	}
 	return parseMessageReactionsJSON(raw), action, nil
+}
+
+// CountVisibleMessages counts the live (not soft-deleted) messages of a chat
+// that are newer than visibleAfter, the per-user history clear watermark. A
+// nil watermark counts every visible message.
+func (r *MessageRepository) CountVisibleMessages(ctx context.Context, chatID string, visibleAfter *time.Time) (int, error) {
+	const query = `
+		SELECT COUNT(*)
+		FROM messages
+		WHERE chat_id = $1::uuid
+		  AND deleted_at IS NULL
+		  AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)
+	`
+	var count int
+	if err := r.client.pool.QueryRow(ctx, query, strings.TrimSpace(chatID), visibleAfter).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// ListAttachmentSummaries returns attachment metadata (never download URLs)
+// for the given messages, keyed by message id; used by the chat export.
+func (r *MessageRepository) ListAttachmentSummaries(ctx context.Context, messageIDs []string) (map[string][]chat.AttachmentSummary, error) {
+	out := make(map[string][]chat.AttachmentSummary, len(messageIDs))
+	ids := make([]string, 0, len(messageIDs))
+	for _, id := range messageIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	const query = `
+		SELECT ma.message_id::text,
+		       a.id::text,
+		       a.filename,
+		       a.mime_type,
+		       a.kind,
+		       a.size_bytes,
+		       a.width,
+		       a.height,
+		       a.duration_ms
+		FROM message_attachments ma
+		INNER JOIN attachments a ON a.id = ma.attachment_id
+		WHERE ma.message_id::text = ANY($1::text[])
+		ORDER BY ma.created_at ASC, a.id ASC
+	`
+	rows, err := r.client.pool.Query(ctx, query, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var messageID string
+		var item chat.AttachmentSummary
+		if err := rows.Scan(
+			&messageID,
+			&item.ID,
+			&item.Filename,
+			&item.MIMEType,
+			&item.Kind,
+			&item.SizeBytes,
+			&item.Width,
+			&item.Height,
+			&item.DurationMS,
+		); err != nil {
+			return nil, err
+		}
+		out[messageID] = append(out[messageID], item)
+	}
+	return out, rows.Err()
 }

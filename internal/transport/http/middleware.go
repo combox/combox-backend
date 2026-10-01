@@ -75,6 +75,7 @@ func AuthMiddleware(accessSecret string, i18n Translator, defaultLocale string) 
 		"/api/private/v1/auth/refresh":           {},
 		"/api/private/v1/auth/logout":            {},
 		"/api/private/v1/ws":                     {},
+		"/api/private/v1/calls/ws":               {},
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -100,14 +101,29 @@ func AuthMiddleware(accessSecret string, i18n Translator, defaultLocale string) 
 				writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.auth.invalid_credentials", nil, i18n, defaultLocale)
 				return
 			}
-			userID, err := verifyAccessToken(token, accessSecret)
+			userID, sessionID, migr, err := verifyAccessTokenWithSession(token, accessSecret)
 			if err != nil {
 				writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "error.auth.invalid_credentials", nil, i18n, defaultLocale)
+				return
+			}
+			// Migr-limited legacy sessions (boxchat migration, 000044) may
+			// only reach the email-binding endpoints, logout and read-only
+			// self/session reads; everything else is 403 with code
+			// EMAIL_BINDING_REQUIRED so the client can open the bind modal.
+			if migr && !migrAllowed(r.Method, path) {
+				writeAPIError(w, r, http.StatusForbidden, "EMAIL_BINDING_REQUIRED", "error.auth.email_binding_required", nil, i18n, defaultLocale)
 				return
 			}
 
 			r2 := r.Clone(r.Context())
 			r2.Header.Set("X-User-ID", userID)
+			// The session id comes from the signed token, never from the
+			// client: overwrite whatever it supplied so handlers can trust it.
+			if sessionID != "" {
+				r2.Header.Set("X-Session-ID", sessionID)
+			} else {
+				r2.Header.Del("X-Session-ID")
+			}
 			next.ServeHTTP(w, r2)
 		})
 	}
@@ -190,6 +206,35 @@ func AccessLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 				slog.String("remote_addr", r.RemoteAddr),
 			)
 		})
+	}
+}
+
+// migrAllowed is the exact allowlist for migr-limited legacy sessions
+// (boxchat migration, 000044). Only these (method, path) pairs pass; every
+// other authenticated route answers 403 EMAIL_BINDING_REQUIRED:
+//
+//	POST /api/private/v1/auth/legacy/bind-email/request  issue an OTP
+//	POST /api/private/v1/auth/legacy/bind-email/verify   verify OTP + bind
+//	POST /api/private/v1/auth/logout                     give up the session
+//	GET  /api/private/v1/profile                         read self ("me")
+//	GET  /api/private/v1/auth/sessions                   read sessions
+//
+// Realtime (/ws, /calls/ws) has no entry on purpose: verifyAccessToken
+// rejects migr tokens there outright.
+func migrAllowed(method, path string) bool {
+	switch {
+	case method == http.MethodPost && path == "/api/private/v1/auth/legacy/bind-email/request":
+		return true
+	case method == http.MethodPost && path == "/api/private/v1/auth/legacy/bind-email/verify":
+		return true
+	case method == http.MethodPost && path == "/api/private/v1/auth/logout":
+		return true
+	case method == http.MethodGet && path == "/api/private/v1/profile":
+		return true
+	case method == http.MethodGet && path == "/api/private/v1/auth/sessions":
+		return true
+	default:
+		return false
 	}
 }
 

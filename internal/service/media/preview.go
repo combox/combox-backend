@@ -59,7 +59,7 @@ func (s *Service) processPreviewAsync(ctx context.Context, a Attachment) {
 	}
 
 	var hlsMasterKey *string
-	if strings.EqualFold(a.Kind, "video") || strings.EqualFold(a.Kind, "audio") {
+	if strings.EqualFold(a.Kind, "video") {
 		masterKey, hlsErr := s.buildAndUploadHLSCopy(ctx, a)
 		if hlsErr != nil {
 			fail(hlsErr)

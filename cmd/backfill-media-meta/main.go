@@ -52,6 +52,10 @@ func (a mediaStoreAdapter) DeleteObject(ctx context.Context, objectKey string) e
 	return a.c.DeleteObject(ctx, objectKey)
 }
 
+func (a mediaStoreAdapter) CopyObject(ctx context.Context, srcKey, dstKey string) error {
+	return a.c.CopyObject(ctx, srcKey, dstKey)
+}
+
 func main() {
 	limit := flag.Int("limit", 5000, "Max number of attachments to scan in one run")
 	flag.Parse()

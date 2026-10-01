@@ -74,6 +74,10 @@ func (r *SearchRepository) SearchUsers(ctx context.Context, q string, limit int)
 	}
 
 	pattern := "%" + strings.ToLower(q) + "%"
+	phonePattern := nonNumericNeverMatches
+	if digits := digitsOnly(q); digits != "" {
+		phonePattern = "%" + digits + "%"
+	}
 	const query = `
 		SELECT id::text,
 		       email,
@@ -88,11 +92,12 @@ func (r *SearchRepository) SearchUsers(ctx context.Context, q string, limit int)
 		   OR LOWER(email) LIKE $1
 		   OR LOWER(COALESCE(first_name, '')) LIKE $1
 		   OR LOWER(COALESCE(last_name, '')) LIKE $1
+		   OR regexp_replace(COALESCE(phone_number, ''), '\D', '', 'g') LIKE $3
 		ORDER BY username ASC
 		LIMIT $2
 	`
 
-	rows, err := r.client.pool.Query(ctx, query, pattern, limit)
+	rows, err := r.client.pool.Query(ctx, query, pattern, limit, phonePattern)
 	if err != nil {
 		return nil, err
 	}
@@ -207,4 +212,19 @@ AND chat_kind IN ('group', 'channel', 'standalone_channel')
 		return nil, err
 	}
 	return out, nil
+}
+
+// nonNumericNeverMatches disables the phone clause when the query carries no
+// digits: phone values are normalized to digits only, so a pattern that
+// contains letters cannot match any of them.
+const nonNumericNeverMatches = "phone-search-disabled"
+
+func digitsOnly(raw string) string {
+	var out strings.Builder
+	for _, r := range raw {
+		if r >= '0' && r <= '9' {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
 }
