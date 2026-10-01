@@ -101,7 +101,7 @@ jobs:
 
       - name: Update GitHub Release notes with Docker pull snippet
         if: ${{ github.event_name == 'release' }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           DOCKERHUB_URL: https://hub.docker.com/r/${{ env.IMAGE_NAME }}
         with:
