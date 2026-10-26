@@ -7,9 +7,9 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/minio/minio-go/v7 v7.3.0
-	github.com/pion/interceptor v0.1.49
-	github.com/pion/rtcp v1.2.18
-	github.com/pion/rtp v1.10.5
+	github.com/pion/interceptor v0.1.51
+	github.com/pion/rtcp v1.2.20
+	github.com/pion/rtp v1.10.6
 	github.com/pion/webrtc/v4 v4.2.21
 	github.com/redis/go-redis/v9 v9.22.0
 	golang.org/x/crypto v0.57.0
